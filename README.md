@@ -1,5 +1,7 @@
 # Трекер курсов валют
 
+[![CI](https://github.com/narumov-diyar/currency-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/narumov-diyar/currency-tracker/actions/workflows/ci.yml)
+
 **Дисциплина:** конструирование программного обеспечения
 
 ## Состав команды
