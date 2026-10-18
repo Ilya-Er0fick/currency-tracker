@@ -1,0 +1,74 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/narumov-diyar/currency-tracker/internal/config"
+	"github.com/narumov-diyar/currency-tracker/internal/httpapi"
+)
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	if err := run(logger); err != nil {
+		logger.Error("api stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	// Контекст закрывается по сигналу остановки и служит признаком завершения работы.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		return err
+	}
+
+	srv := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           httpapi.NewRouter(pool, logger),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	listenErr := make(chan error, 1)
+	go func() {
+		logger.Info("api started", "addr", cfg.Addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			listenErr <- err
+		}
+	}()
+
+	select {
+	case err := <-listenErr:
+		return err
+	case <-ctx.Done():
+	}
+
+	// Контекст сигналов уже отменён, поэтому ожидание активных запросов ведём по отдельному.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+	defer cancel()
+
+	logger.Info("api shutting down")
+	return srv.Shutdown(shutdownCtx)
+}
