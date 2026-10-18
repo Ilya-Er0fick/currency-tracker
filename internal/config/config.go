@@ -15,7 +15,14 @@ type Config struct {
 	ShutdownTimeout time.Duration
 }
 
+// EnvFile — имя файла с настройками для разработки, лежащего рядом с проектом.
+const EnvFile = ".env"
+
 func Load() (Config, error) {
+	if err := LoadEnvFile(EnvFile); err != nil {
+		return Config{}, err
+	}
+
 	cfg := Config{
 		Addr:            stringEnv("API_ADDR", ":8080"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
