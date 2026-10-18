@@ -14,6 +14,7 @@ import (
 
 	"github.com/narumov-diyar/currency-tracker/internal/config"
 	"github.com/narumov-diyar/currency-tracker/internal/httpapi"
+	"github.com/narumov-diyar/currency-tracker/internal/storage"
 )
 
 func main() {
@@ -43,6 +44,14 @@ func run(logger *slog.Logger) error {
 
 	if err := pool.Ping(ctx); err != nil {
 		return err
+	}
+
+	applied, err := storage.Migrate(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if len(applied) > 0 {
+		logger.Info("migrations applied", "versions", applied)
 	}
 
 	srv := &http.Server{
