@@ -18,8 +18,10 @@ type stubPinger struct {
 func (s stubPinger) Ping(context.Context) error { return s.err }
 
 func newTestRouter(pingErr error) http.Handler {
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewRouter(stubPinger{err: pingErr}, logger)
+	return NewRouter(Deps{
+		DB:     stubPinger{err: pingErr},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
 }
 
 func TestHealthReportsOK(t *testing.T) {

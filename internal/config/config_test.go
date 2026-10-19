@@ -1,9 +1,12 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+var testSecret = strings.Repeat("k", 32)
 
 func TestLoadRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
@@ -15,6 +18,7 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 
 func TestLoadAppliesDefaults(t *testing.T) {
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+	t.Setenv("AUTH_SECRET", testSecret)
 	t.Setenv("API_ADDR", "")
 	t.Setenv("API_SHUTDOWN_TIMEOUT", "")
 
@@ -46,6 +50,7 @@ func TestLoadShutdownTimeout(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+			t.Setenv("AUTH_SECRET", testSecret)
 			t.Setenv("API_SHUTDOWN_TIMEOUT", tt.value)
 
 			cfg, err := Load()
@@ -60,6 +65,33 @@ func TestLoadShutdownTimeout(t *testing.T) {
 			}
 			if cfg.ShutdownTimeout != tt.want {
 				t.Errorf("ShutdownTimeout = %v, want %v", cfg.ShutdownTimeout, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadRequiresStrongAuthSecret(t *testing.T) {
+	tests := []struct {
+		name   string
+		secret string
+		fails  bool
+	}{
+		{name: "missing", secret: "", fails: true},
+		{name: "too short", secret: strings.Repeat("k", 31), fails: true},
+		{name: "minimum length", secret: strings.Repeat("k", 32)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
+			t.Setenv("AUTH_SECRET", tt.secret)
+
+			_, err := Load()
+			if tt.fails && err == nil {
+				t.Error("expected an error for a weak secret")
+			}
+			if !tt.fails && err != nil {
+				t.Errorf("unexpected error: %v", err)
 			}
 		})
 	}

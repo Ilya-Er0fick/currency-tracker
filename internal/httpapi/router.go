@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/narumov-diyar/currency-tracker/internal/storage"
 )
 
 // Pinger описывает ту часть пула соединений, которая нужна обработчикам.
@@ -13,18 +15,39 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+type UserStore interface {
+	Create(ctx context.Context, email, passwordHash string) (int64, error)
+	ByEmail(ctx context.Context, email string) (storage.User, error)
+}
+
+type TokenIssuer interface {
+	Issue(userID int64) (string, time.Time, error)
+	Parse(raw string) (int64, error)
+}
+
+type Deps struct {
+	DB     Pinger
+	Users  UserStore
+	Tokens TokenIssuer
+	Logger *slog.Logger
+}
+
 type Server struct {
 	pool   Pinger
+	users  UserStore
+	tokens TokenIssuer
 	logger *slog.Logger
 }
 
-func NewRouter(pool Pinger, logger *slog.Logger) http.Handler {
-	s := &Server{pool: pool, logger: logger}
+func NewRouter(d Deps) http.Handler {
+	s := &Server{pool: d.DB, users: d.Users, tokens: d.Tokens, logger: d.Logger}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("POST /api/auth/register", s.register)
+	mux.HandleFunc("POST /api/auth/login", s.login)
 
-	return requestLogger(logger)(mux)
+	return requestLogger(d.Logger)(mux)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
