@@ -30,6 +30,10 @@ type AssetStore interface {
 	BySymbol(ctx context.Context, symbol string) (storage.Asset, error)
 }
 
+type CandleStore interface {
+	Series(ctx context.Context, assetID int, resolution int16, from, to time.Time, limit int) ([]storage.Candle, error)
+}
+
 type PairStore interface {
 	List(ctx context.Context, userID int64) ([]storage.Pair, error)
 	Create(ctx context.Context, userID int64, baseAssetID, quoteAssetID int) (int64, error)
@@ -37,31 +41,34 @@ type PairStore interface {
 }
 
 type Deps struct {
-	DB     Pinger
-	Users  UserStore
-	Assets AssetStore
-	Pairs  PairStore
-	Tokens TokenIssuer
-	Logger *slog.Logger
+	DB      Pinger
+	Users   UserStore
+	Assets  AssetStore
+	Pairs   PairStore
+	Candles CandleStore
+	Tokens  TokenIssuer
+	Logger  *slog.Logger
 }
 
 type Server struct {
-	pool   Pinger
-	users  UserStore
-	assets AssetStore
-	pairs  PairStore
-	tokens TokenIssuer
-	logger *slog.Logger
+	pool    Pinger
+	users   UserStore
+	assets  AssetStore
+	pairs   PairStore
+	candles CandleStore
+	tokens  TokenIssuer
+	logger  *slog.Logger
 }
 
 func NewRouter(d Deps) http.Handler {
 	s := &Server{
-		pool:   d.DB,
-		users:  d.Users,
-		assets: d.Assets,
-		pairs:  d.Pairs,
-		tokens: d.Tokens,
-		logger: d.Logger,
+		pool:    d.DB,
+		users:   d.Users,
+		assets:  d.Assets,
+		pairs:   d.Pairs,
+		candles: d.Candles,
+		tokens:  d.Tokens,
+		logger:  d.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -75,6 +82,8 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/watchlist", s.requireAuth(s.listWatchlist))
 	mux.HandleFunc("POST /api/watchlist", s.requireAuth(s.addPair))
 	mux.HandleFunc("DELETE /api/watchlist/{id}", s.requireAuth(s.removePair))
+
+	mux.HandleFunc("GET /api/history", s.requireAuth(s.history))
 
 	return requestLogger(d.Logger)(mux)
 }
