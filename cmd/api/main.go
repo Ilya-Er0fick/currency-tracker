@@ -61,6 +61,8 @@ func run(logger *slog.Logger) error {
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:     pool,
 		Users:  storage.NewUsers(pool),
+		Assets: storage.NewAssets(pool),
+		Pairs:  storage.NewPairs(pool),
 		Tokens: auth.NewTokenIssuer(cfg.AuthSecret, tokenTTL),
 		Logger: logger,
 	})
