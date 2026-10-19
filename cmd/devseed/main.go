@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/narumov-diyar/currency-tracker/internal/config"
 	"github.com/narumov-diyar/currency-tracker/internal/devdata"
 )
 
@@ -28,6 +29,10 @@ func main() {
 }
 
 func run(days int, seed int64) error {
+	if err := config.LoadEnvFile(config.EnvFile); err != nil {
+		return err
+	}
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		return fmt.Errorf("DATABASE_URL is not set")
