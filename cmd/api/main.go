@@ -12,10 +12,14 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/narumov-diyar/currency-tracker/internal/auth"
 	"github.com/narumov-diyar/currency-tracker/internal/config"
 	"github.com/narumov-diyar/currency-tracker/internal/httpapi"
 	"github.com/narumov-diyar/currency-tracker/internal/storage"
 )
+
+// Срок жизни сессионного токена.
+const tokenTTL = 24 * time.Hour
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -54,9 +58,16 @@ func run(logger *slog.Logger) error {
 		logger.Info("migrations applied", "versions", applied)
 	}
 
+	router := httpapi.NewRouter(httpapi.Deps{
+		DB:     pool,
+		Users:  storage.NewUsers(pool),
+		Tokens: auth.NewTokenIssuer(cfg.AuthSecret, tokenTTL),
+		Logger: logger,
+	})
+
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.NewRouter(pool, logger),
+		Handler:           router,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

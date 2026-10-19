@@ -12,8 +12,12 @@ import (
 type Config struct {
 	Addr            string
 	DatabaseURL     string
+	AuthSecret      string
 	ShutdownTimeout time.Duration
 }
+
+// Короткий секрет сводит на нет подпись токенов, поэтому длина проверяется явно.
+const minAuthSecretLength = 32
 
 // EnvFile — имя файла с настройками для разработки, лежащего рядом с проектом.
 const EnvFile = ".env"
@@ -26,11 +30,16 @@ func Load() (Config, error) {
 	cfg := Config{
 		Addr:            stringEnv("API_ADDR", ":8080"),
 		DatabaseURL:     os.Getenv("DATABASE_URL"),
+		AuthSecret:      os.Getenv("AUTH_SECRET"),
 		ShutdownTimeout: 10 * time.Second,
 	}
 
 	if cfg.DatabaseURL == "" {
 		return Config{}, errors.New("DATABASE_URL is not set")
+	}
+
+	if len(cfg.AuthSecret) < minAuthSecretLength {
+		return Config{}, fmt.Errorf("AUTH_SECRET must be at least %d characters", minAuthSecretLength)
 	}
 
 	if raw := os.Getenv("API_SHUTDOWN_TIMEOUT"); raw != "" {
