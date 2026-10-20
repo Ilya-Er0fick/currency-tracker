@@ -24,6 +24,7 @@ func newStubAssets() *stubAssets {
 		"BTC":  {ID: 1, Symbol: "BTC", Type: "crypto", Source: "bybit", ResolutionSeconds: 60, SupportsRealtime: true},
 		"USDT": {ID: 2, Symbol: "USDT", Type: "crypto", Source: "bybit", ResolutionSeconds: 60, SupportsRealtime: true},
 		"RUB":  {ID: 3, Symbol: "RUB", Type: "fiat", Source: "er-api", ResolutionSeconds: 86400},
+		"KZT":  {ID: 4, Symbol: "KZT", Type: "fiat", Source: "er-api", ResolutionSeconds: 86400},
 	}}
 }
 
@@ -144,8 +145,8 @@ func TestAssetCatalogIsPublic(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &assets); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if len(assets) != 3 {
-		t.Errorf("got %d assets, want 3", len(assets))
+	if len(assets) != 4 {
+		t.Errorf("got %d assets, want 4", len(assets))
 	}
 }
 

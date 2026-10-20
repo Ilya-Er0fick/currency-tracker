@@ -25,6 +25,9 @@ type recordedQuery struct {
 type stubCandles struct {
 	queries []recordedQuery
 	candles []storage.Candle
+
+	crossParams []storage.CrossSeriesParams
+	crossPoints []storage.CrossPoint
 }
 
 func (s *stubCandles) Series(_ context.Context, assetID int, resolution int16,
@@ -34,6 +37,11 @@ func (s *stubCandles) Series(_ context.Context, assetID int, resolution int16,
 		assetID: assetID, resolution: resolution, from: from, to: to, limit: limit,
 	})
 	return s.candles, nil
+}
+
+func (s *stubCandles) CrossSeries(_ context.Context, params storage.CrossSeriesParams) ([]storage.CrossPoint, error) {
+	s.crossParams = append(s.crossParams, params)
+	return s.crossPoints, nil
 }
 
 func newHistoryEnv(t *testing.T, candles *stubCandles) (http.Handler, string) {
