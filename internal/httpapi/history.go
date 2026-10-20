@@ -3,6 +3,7 @@ package httpapi
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/narumov-diyar/currency-tracker/internal/market"
@@ -30,13 +31,14 @@ type crossResponse struct {
 }
 
 type historyResponse struct {
-	Period string          `json:"period"`
-	Mode   string          `json:"mode"`
-	From   time.Time       `json:"from"`
-	To     time.Time       `json:"to"`
-	Base   *seriesResponse `json:"base,omitempty"`
-	Quote  *seriesResponse `json:"quote,omitempty"`
-	Cross  *crossResponse  `json:"cross,omitempty"`
+	Period    string           `json:"period"`
+	Mode      string           `json:"mode"`
+	From      time.Time        `json:"from"`
+	To        time.Time        `json:"to"`
+	Base      *seriesResponse  `json:"base,omitempty"`
+	Quote     *seriesResponse  `json:"quote,omitempty"`
+	Cross     *crossResponse   `json:"cross,omitempty"`
+	Analytics market.Analytics `json:"analytics"`
 }
 
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +75,26 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	to := time.Now().UTC()
 	from := to.Add(-period.Window)
 
-	response := historyResponse{Period: period.Name, Mode: mode, From: from, To: to}
+	// Ряды обеих сторон нужны в любом режиме: показатели считаются по ним,
+	// а не по готовой кривой кросс-курса.
+	baseSeries, err := s.loadSeries(r, base, period, from, to)
+	if err != nil {
+		s.fail(w, "load base series", err)
+		return
+	}
+	quoteSeries, err := s.loadSeries(r, quote, period, from, to)
+	if err != nil {
+		s.fail(w, "load quote series", err)
+		return
+	}
+
+	response := historyResponse{
+		Period:    period.Name,
+		Mode:      mode,
+		From:      from,
+		To:        to,
+		Analytics: market.Analyse(analyticsPoints(baseSeries), analyticsPoints(quoteSeries)),
+	}
 
 	if mode == modeCross {
 		cross, err := s.loadCross(r, base, quote, period, from, to)
@@ -83,17 +104,6 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		}
 		response.Cross = cross
 		writeJSON(w, http.StatusOK, response)
-		return
-	}
-
-	baseSeries, err := s.loadSeries(r, base, period, from, to)
-	if err != nil {
-		s.fail(w, "load base series", err)
-		return
-	}
-	quoteSeries, err := s.loadSeries(r, quote, period, from, to)
-	if err != nil {
-		s.fail(w, "load quote series", err)
 		return
 	}
 
@@ -190,4 +200,27 @@ func (s *Server) loadCross(r *http.Request, base, quote storage.Asset, period ma
 		cross.Points = append(cross.Points, []any{p.CollectedAt.UnixMilli(), p.Rate})
 	}
 	return cross, nil
+}
+
+// analyticsPoints переводит ряд в числа для расчёта показателей.
+//
+// Цены приводятся к числу с плавающей точкой: корреляция и разброс
+// доходностей — величины статистические, и точности double для них с запасом
+// хватает. В самих рядах цены по-прежнему остаются строками, потому что там
+// они показываются пользователю как есть.
+func analyticsPoints(series seriesResponse) []market.Point {
+	points := make([]market.Point, 0, len(series.Candles))
+	for _, row := range series.Candles {
+		ts, okTime := row[0].(int64)
+		raw, okClose := row[4].(string)
+		if !okTime || !okClose {
+			continue
+		}
+		close, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			continue
+		}
+		points = append(points, market.Point{Time: time.UnixMilli(ts).UTC(), Close: close})
+	}
+	return points
 }
