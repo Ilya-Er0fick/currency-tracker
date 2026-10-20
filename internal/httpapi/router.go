@@ -32,6 +32,7 @@ type AssetStore interface {
 
 type CandleStore interface {
 	Series(ctx context.Context, assetID int, resolution int16, from, to time.Time, limit int) ([]storage.Candle, error)
+	CrossSeries(ctx context.Context, params storage.CrossSeriesParams) ([]storage.CrossPoint, error)
 }
 
 type PairStore interface {
