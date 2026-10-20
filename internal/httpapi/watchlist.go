@@ -44,8 +44,8 @@ func (s *Server) addPair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req.Base = strings.ToUpper(strings.TrimSpace(req.Base))
-	req.Quote = strings.ToUpper(strings.TrimSpace(req.Quote))
+	req.Base = upper(req.Base)
+	req.Quote = upper(req.Quote)
 
 	if req.Base == req.Quote {
 		writeError(w, http.StatusBadRequest, "a pair needs two different assets")
@@ -113,4 +113,8 @@ func (s *Server) removePair(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func upper(symbol string) string {
+	return strings.ToUpper(strings.TrimSpace(symbol))
 }
