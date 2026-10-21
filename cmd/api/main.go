@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/narumov-diyar/currency-tracker/internal/alerts"
 	"github.com/narumov-diyar/currency-tracker/internal/auth"
 	"github.com/narumov-diyar/currency-tracker/internal/config"
 	"github.com/narumov-diyar/currency-tracker/internal/httpapi"
@@ -58,15 +59,19 @@ func run(logger *slog.Logger) error {
 		logger.Info("migrations applied", "versions", applied)
 	}
 
+	alertStore := storage.NewAlerts(pool)
+	go alerts.NewListener(pool, alerts.NewService(alertStore, logger), logger).Run(ctx)
+
 	router := httpapi.NewRouter(httpapi.Deps{
-		DB:      pool,
-		Users:   storage.NewUsers(pool),
-		Assets:  storage.NewAssets(pool),
-		Pairs:   storage.NewPairs(pool),
-		Candles: storage.NewCandles(pool),
-		Alerts:  storage.NewAlerts(pool),
-		Tokens:  auth.NewTokenIssuer(cfg.AuthSecret, tokenTTL),
-		Logger:  logger,
+		DB:            pool,
+		Users:         storage.NewUsers(pool),
+		Assets:        storage.NewAssets(pool),
+		Pairs:         storage.NewPairs(pool),
+		Candles:       storage.NewCandles(pool),
+		Alerts:        storage.NewAlerts(pool),
+		Notifications: storage.NewNotifications(pool),
+		Tokens:        auth.NewTokenIssuer(cfg.AuthSecret, tokenTTL),
+		Logger:        logger,
 	})
 
 	srv := &http.Server{

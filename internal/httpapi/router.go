@@ -42,6 +42,11 @@ type PairStore interface {
 	Owned(ctx context.Context, userID, pairID int64) (bool, error)
 }
 
+type NotificationStore interface {
+	Unseen(ctx context.Context, userID int64) ([]storage.Notification, error)
+	MarkSeen(ctx context.Context, userID int64) error
+}
+
 type AlertStore interface {
 	List(ctx context.Context, userID int64) ([]storage.AlertRule, error)
 	Create(ctx context.Context, rule storage.NewAlertRule) (storage.AlertRule, error)
@@ -50,37 +55,40 @@ type AlertStore interface {
 }
 
 type Deps struct {
-	DB      Pinger
-	Users   UserStore
-	Assets  AssetStore
-	Pairs   PairStore
-	Candles CandleStore
-	Alerts  AlertStore
-	Tokens  TokenIssuer
-	Logger  *slog.Logger
+	DB            Pinger
+	Users         UserStore
+	Assets        AssetStore
+	Pairs         PairStore
+	Candles       CandleStore
+	Alerts        AlertStore
+	Notifications NotificationStore
+	Tokens        TokenIssuer
+	Logger        *slog.Logger
 }
 
 type Server struct {
-	pool    Pinger
-	users   UserStore
-	assets  AssetStore
-	pairs   PairStore
-	candles CandleStore
-	alerts  AlertStore
-	tokens  TokenIssuer
-	logger  *slog.Logger
+	pool          Pinger
+	users         UserStore
+	assets        AssetStore
+	pairs         PairStore
+	candles       CandleStore
+	alerts        AlertStore
+	notifications NotificationStore
+	tokens        TokenIssuer
+	logger        *slog.Logger
 }
 
 func NewRouter(d Deps) http.Handler {
 	s := &Server{
-		pool:    d.DB,
-		users:   d.Users,
-		assets:  d.Assets,
-		pairs:   d.Pairs,
-		candles: d.Candles,
-		alerts:  d.Alerts,
-		tokens:  d.Tokens,
-		logger:  d.Logger,
+		pool:          d.DB,
+		users:         d.Users,
+		assets:        d.Assets,
+		pairs:         d.Pairs,
+		candles:       d.Candles,
+		alerts:        d.Alerts,
+		notifications: d.Notifications,
+		tokens:        d.Tokens,
+		logger:        d.Logger,
 	}
 
 	mux := http.NewServeMux()
@@ -101,6 +109,9 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/alerts", s.requireAuth(s.createAlert))
 	mux.HandleFunc("PATCH /api/alerts/{id}", s.requireAuth(s.updateAlert))
 	mux.HandleFunc("DELETE /api/alerts/{id}", s.requireAuth(s.deleteAlert))
+
+	mux.HandleFunc("GET /api/notifications", s.requireAuth(s.listNotifications))
+	mux.HandleFunc("POST /api/notifications/seen", s.requireAuth(s.markNotificationsSeen))
 
 	return requestLogger(d.Logger)(mux)
 }
