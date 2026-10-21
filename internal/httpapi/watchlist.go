@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"github.com/narumov-diyar/currency-tracker/internal/storage"
@@ -94,13 +93,12 @@ func (s *Server) resolveAsset(w http.ResponseWriter, r *http.Request, symbol str
 func (s *Server) removePair(w http.ResponseWriter, r *http.Request) {
 	userID, _ := UserID(r.Context())
 
-	pairID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "pair id must be a number")
+	pairID, ok := parseID(w, r.PathValue("id"))
+	if !ok {
 		return
 	}
 
-	err = s.pairs.Delete(r.Context(), userID, pairID)
+	err := s.pairs.Delete(r.Context(), userID, pairID)
 	// Чужая пара и несуществующая дают один и тот же ответ: иначе по коду
 	// можно было бы узнать, какие идентификаторы заняты другими пользователями.
 	if errors.Is(err, storage.ErrPairNotFound) {

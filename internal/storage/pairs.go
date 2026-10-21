@@ -129,3 +129,14 @@ func (p *Pairs) Delete(ctx context.Context, userID, pairID int64) error {
 	}
 	return nil
 }
+
+// Owned проверяет, что пара принадлежит пользователю. Внешний ключ на
+// user_pairs этого не гарантирует: он допускает ссылку на чужую пару,
+// поэтому правило оповещения приходится проверять отдельно.
+func (p *Pairs) Owned(ctx context.Context, userID, pairID int64) (bool, error) {
+	var exists bool
+	err := p.pool.QueryRow(ctx,
+		`SELECT exists(SELECT 1 FROM user_pairs WHERE id = $1 AND user_id = $2)`,
+		pairID, userID).Scan(&exists)
+	return exists, err
+}

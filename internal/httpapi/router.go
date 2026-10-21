@@ -39,6 +39,14 @@ type PairStore interface {
 	List(ctx context.Context, userID int64) ([]storage.Pair, error)
 	Create(ctx context.Context, userID int64, baseAssetID, quoteAssetID int) (int64, error)
 	Delete(ctx context.Context, userID, pairID int64) error
+	Owned(ctx context.Context, userID, pairID int64) (bool, error)
+}
+
+type AlertStore interface {
+	List(ctx context.Context, userID int64) ([]storage.AlertRule, error)
+	Create(ctx context.Context, rule storage.NewAlertRule) (storage.AlertRule, error)
+	Update(ctx context.Context, userID, ruleID int64, update storage.AlertUpdate) (storage.AlertRule, error)
+	Delete(ctx context.Context, userID, ruleID int64) error
 }
 
 type Deps struct {
@@ -47,6 +55,7 @@ type Deps struct {
 	Assets  AssetStore
 	Pairs   PairStore
 	Candles CandleStore
+	Alerts  AlertStore
 	Tokens  TokenIssuer
 	Logger  *slog.Logger
 }
@@ -57,6 +66,7 @@ type Server struct {
 	assets  AssetStore
 	pairs   PairStore
 	candles CandleStore
+	alerts  AlertStore
 	tokens  TokenIssuer
 	logger  *slog.Logger
 }
@@ -68,6 +78,7 @@ func NewRouter(d Deps) http.Handler {
 		assets:  d.Assets,
 		pairs:   d.Pairs,
 		candles: d.Candles,
+		alerts:  d.Alerts,
 		tokens:  d.Tokens,
 		logger:  d.Logger,
 	}
@@ -85,6 +96,11 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /api/watchlist/{id}", s.requireAuth(s.removePair))
 
 	mux.HandleFunc("GET /api/history", s.requireAuth(s.history))
+
+	mux.HandleFunc("GET /api/alerts", s.requireAuth(s.listAlerts))
+	mux.HandleFunc("POST /api/alerts", s.requireAuth(s.createAlert))
+	mux.HandleFunc("PATCH /api/alerts/{id}", s.requireAuth(s.updateAlert))
+	mux.HandleFunc("DELETE /api/alerts/{id}", s.requireAuth(s.deleteAlert))
 
 	return requestLogger(d.Logger)(mux)
 }
