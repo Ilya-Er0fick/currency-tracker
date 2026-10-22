@@ -64,6 +64,7 @@ func run(logger *slog.Logger) error {
 		Assets:  storage.NewAssets(pool),
 		Pairs:   storage.NewPairs(pool),
 		Candles: storage.NewCandles(pool),
+		Alerts:  storage.NewAlerts(pool),
 		Tokens:  auth.NewTokenIssuer(cfg.AuthSecret, tokenTTL),
 		Logger:  logger,
 	})

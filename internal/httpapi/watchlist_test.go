@@ -78,6 +78,11 @@ func (s *stubPairs) Create(_ context.Context, userID int64, base, quote int) (in
 	return id, nil
 }
 
+func (s *stubPairs) Owned(_ context.Context, userID, pairID int64) (bool, error) {
+	owner, ok := s.owners[pairID]
+	return ok && owner == userID, nil
+}
+
 func (s *stubPairs) Delete(_ context.Context, userID, pairID int64) error {
 	if owner, ok := s.owners[pairID]; !ok || owner != userID {
 		return storage.ErrPairNotFound
