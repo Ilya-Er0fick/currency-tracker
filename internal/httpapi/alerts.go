@@ -201,3 +201,26 @@ func parseID(w http.ResponseWriter, raw string) (int64, bool) {
 	}
 	return id, true
 }
+
+func (s *Server) listNotifications(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserID(r.Context())
+
+	list, err := s.notifications.Unseen(r.Context(), userID)
+	if err != nil {
+		s.fail(w, "list notifications", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// markNotificationsSeen гасит значок непрочитанного. Сами уведомления
+// остаются: история срабатываний должна быть видна.
+func (s *Server) markNotificationsSeen(w http.ResponseWriter, r *http.Request) {
+	userID, _ := UserID(r.Context())
+
+	if err := s.notifications.MarkSeen(r.Context(), userID); err != nil {
+		s.fail(w, "mark notifications seen", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
