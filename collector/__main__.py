@@ -6,10 +6,16 @@ import asyncio
 import signal
 import sys
 
+import aiohttp
 import asyncpg
 
 from . import config, log
-from .schedule import Job, run_periodic
+from .db import Store
+from .httpclient import json_fetcher
+from .jobs import CryptoJob
+from .schedule import run_periodic
+
+USER_AGENT = "currency-tracker-collector/1.0"
 
 
 async def run(cfg: config.Config, logger: log.Logger) -> None:
@@ -22,9 +28,12 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
 
     pool = await asyncpg.create_pool(cfg.database_url, min_size=1, max_size=cfg.db_pool_size)
     try:
-        jobs: list[Job] = []
-        logger.info("collector started", jobs=[job.name for job in jobs])
-        await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
+        store = Store(pool)
+        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
+            fetch = json_fetcher(session)
+            jobs = [CryptoJob(store, fetch, logger)]
+            logger.info("collector started", jobs=[job.name for job in jobs])
+            await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
     finally:
         await pool.close()
     logger.info("collector stopped")
