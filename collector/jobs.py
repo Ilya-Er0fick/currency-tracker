@@ -17,7 +17,7 @@ from .httpclient import FetchJSON
 from .log import Logger
 from .retry import with_retry
 from .schedule import Job, seconds_until_next
-from .sources import bybit, erapi
+from .sources import bybit, cbr, erapi
 
 # Сдвиг опроса от границы интервала. Минутную свечу биржа закрывает
 # не мгновенно, а курсы er-api обновляются в первые полчаса суток UTC.
@@ -166,17 +166,18 @@ class CryptoJob(Job):
 
 
 class FiatJob(Job):
-    """Раз в сутки забирает курсы фиатных валют."""
+    """Раз в сутки забирает курсы фиатных валют, при отказе — курс рубля от ЦБ."""
 
     name = "fiat"
 
     def __init__(self, store: Store, fetch: FetchJSON, primary: CircuitBreaker,
-                 stop: asyncio.Event, logger: Logger, *,
+                 backup: CircuitBreaker, stop: asyncio.Event, logger: Logger, *,
                  attempts: int, retry_interval: float, base_delay: float = 1.0,
                  clock: Callable[[], float] = time.time):
         self._store = store
         self._fetch = fetch
         self._primary = primary
+        self._backup = backup
         self._stop = stop
         self._logger = logger
         self._attempts = attempts
@@ -193,8 +194,8 @@ class FiatJob(Job):
         if await self._collect(assets, period):
             return until_next
         # Сутки до следующей попытки — слишком долго: неуспешный цикл
-        # повторяется чаще, и по этим повторам предохранитель источника
-        # успевает открыться.
+        # повторяется чаще, и по этим повторам предохранитель основного
+        # источника успевает открыться и включить резервный.
         return min(self._retry_interval, until_next)
 
     async def _collect(self, assets: list[Asset], period: float) -> bool:
@@ -222,6 +223,9 @@ class FiatJob(Job):
                 self._primary.record_success()
                 await self._save_prices(assets, day, prices)
                 return True
+
+        if self._primary.state is State.OPEN:
+            await self._fallback(assets, deadline)
         return False
 
     async def _save_prices(self, assets: list[Asset], day: datetime,
@@ -235,3 +239,32 @@ class FiatJob(Job):
         saved = await self._store.save_candles(candles)
         self._logger.info("fiat cycle finished", source=erapi.NAME, day=day.date().isoformat(),
                           fetched=len(candles), saved=saved)
+
+    async def _fallback(self, assets: list[Asset], deadline: float) -> None:
+        rub = next((a for a in assets if a.symbol == cbr.SYMBOL), None)
+        if rub is None:
+            return
+
+        state = self._backup.state
+        if state is State.OPEN:
+            self._logger.warning("source suspended by circuit breaker", source=cbr.NAME)
+            return
+
+        self._logger.warning("switching to backup source", primary=erapi.NAME, backup=cbr.NAME)
+        try:
+            day, price = await with_retry(
+                lambda: cbr.fetch_rub(self._fetch),
+                attempts=1 if state is State.HALF_OPEN else self._attempts,
+                deadline=deadline, stop=self._stop, logger=self._logger, what=cbr.NAME,
+                base_delay=self._base_delay,
+            )
+        except SourceError as exc:
+            self._backup.record_failure()
+            self._logger.error("request failed", source=cbr.NAME,
+                               error_type=type(exc).__name__, error=str(exc))
+            return
+
+        self._backup.record_success()
+        saved = await self._store.save_candles([flat_candle(rub.id, rub.resolution, day, price)])
+        self._logger.info("fiat cycle finished", source=cbr.NAME, day=day.date().isoformat(),
+                          fetched=1, saved=saved)

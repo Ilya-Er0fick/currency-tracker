@@ -6,7 +6,7 @@ from collector.breaker import CircuitBreaker, State
 from collector.db import Asset
 from collector.errors import RequestRejectedError, TransientError
 from collector.jobs import CryptoJob, FiatJob, _usable
-from collector.sources import bybit, erapi
+from collector.sources import bybit, cbr, erapi
 
 from .helpers import FakeClock, FakeSource, FakeStore, RecordingLogger, crypto, fiat, quiet_logger
 
@@ -146,10 +146,10 @@ ERAPI_OK = {"result": "success", "time_last_update_unix": 1793059351,
             "rates": {"USD": 1, "RUB": 84, "EUR": 0.92}}
 
 
-def fiat_job(store, source, clock, logger=None, primary=None):
-    return FiatJob(store, source, primary or breaker("er-api", clock), asyncio.Event(),
-                   logger or quiet_logger(), attempts=4, retry_interval=600, base_delay=0.001,
-                   clock=clock)
+def fiat_job(store, source, clock, logger=None, primary=None, backup=None):
+    return FiatJob(store, source, primary or breaker("er-api", clock),
+                   backup or breaker("cbr", clock), asyncio.Event(), logger or quiet_logger(),
+                   attempts=4, retry_interval=600, base_delay=0.001, clock=clock)
 
 
 def test_fiat_cycle_stores_inverted_rates():
@@ -260,7 +260,7 @@ def test_crypto_single_symbol_failure_does_not_trip_breaker():
 def test_fiat_breaker_opens_after_failed_cycles():
     clock = FakeClock(NOW)
     store = FakeStore(fiat_assets=FIAT)
-    source = FakeSource({erapi.URL: TransientError("503")})
+    source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: TransientError("503")})
     primary = breaker("er-api", clock, threshold=3)
 
     async def go():
@@ -268,9 +268,9 @@ def test_fiat_breaker_opens_after_failed_cycles():
         delays = [await job.cycle() for _ in range(3)]
         assert delays == [600, 600, 600]
         assert primary.state is State.OPEN
-        calls = len(source.calls)
+        calls = source.calls.count(erapi.URL)
         await job.cycle()
-        assert len(source.calls) == calls  # Open: к источнику не обращаемся
+        assert source.calls.count(erapi.URL) == calls  # Open: к источнику не обращаемся
 
     asyncio.run(go())
 
@@ -288,7 +288,8 @@ def test_fiat_invalid_response_is_not_retried():
 def test_fiat_failure_does_not_affect_crypto_breaker():
     clock = FakeClock(NOW)
     store = FakeStore([crypto(2, "BTC")], FIAT)
-    source = FakeSource({erapi.URL: TransientError("503"), route("BTC"): kline(CLOSED_MS)})
+    source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: TransientError("503"),
+                         route("BTC"): kline(CLOSED_MS)})
     primary, crypto_breaker = breaker("er-api", clock, 1), breaker("bybit", clock, 1)
 
     async def go():

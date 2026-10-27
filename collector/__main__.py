@@ -15,7 +15,7 @@ from .db import Store
 from .httpclient import json_fetcher
 from .jobs import CryptoJob, FiatJob
 from .schedule import run_periodic
-from .sources import bybit, erapi
+from .sources import bybit, cbr, erapi
 
 USER_AGENT = "currency-tracker-collector/1.0"
 
@@ -45,7 +45,7 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
             jobs = [
                 CryptoJob(store, fetch, breaker(bybit.NAME), stop, logger,
                           attempts=cfg.retry_attempts),
-                FiatJob(store, fetch, breaker(erapi.NAME), stop, logger,
+                FiatJob(store, fetch, breaker(erapi.NAME), breaker(cbr.NAME), stop, logger,
                         attempts=cfg.retry_attempts, retry_interval=cfg.fiat_retry_interval),
             ]
             logger.info("collector started", jobs=[job.name for job in jobs])
