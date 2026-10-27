@@ -61,6 +61,11 @@ class Store:
             f"SELECT {_ASSET_COLUMNS} FROM assets WHERE source = $1 ORDER BY symbol", source)
         return [Asset(**dict(row)) for row in rows]
 
+    async def assets_by_type(self, asset_type: str) -> list[Asset]:
+        rows = await self._pool.fetch(
+            f"SELECT {_ASSET_COLUMNS} FROM assets WHERE type = $1 ORDER BY symbol", asset_type)
+        return [Asset(**dict(row)) for row in rows]
+
     async def save_candles(self, candles: list[Candle]) -> int:
         if not candles:
             return 0

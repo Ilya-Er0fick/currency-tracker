@@ -15,13 +15,15 @@ from .errors import SourceError
 from .httpclient import FetchJSON
 from .log import Logger
 from .schedule import Job, seconds_until_next
-from .sources import bybit
+from .sources import bybit, erapi
 
-# Сдвиг опроса от границы интервала: минутную свечу биржа закрывает
-# не мгновенно.
+# Сдвиг опроса от границы интервала. Минутную свечу биржа закрывает
+# не мгновенно, а курсы er-api обновляются в первые полчаса суток UTC.
 CRYPTO_OFFSET = 2.0
+FIAT_OFFSET = 3600.0
 
 DEFAULT_CRYPTO_PERIOD = 60
+DEFAULT_FIAT_PERIOD = 86400
 
 # Одновременных запросов к бирже: каталог опрашивается за секунды,
 # а лимит биржи остаётся далеко.
@@ -30,6 +32,7 @@ BYBIT_CONCURRENCY = 10
 
 class Store(Protocol):
     async def assets_by_source(self, source: str) -> list[Asset]: ...
+    async def assets_by_type(self, asset_type: str) -> list[Asset]: ...
     async def save_candles(self, candles: list[Candle]) -> int: ...
 
 
@@ -115,3 +118,55 @@ class CryptoJob(Job):
             self._logger.exception("unexpected error", source=bybit.NAME, symbol=asset.symbol,
                                    error_type=type(exc).__name__, error=str(exc))
             return None
+
+
+class FiatJob(Job):
+    """Раз в сутки забирает курсы фиатных валют."""
+
+    name = "fiat"
+
+    def __init__(self, store: Store, fetch: FetchJSON, logger: Logger, *,
+                 retry_interval: float, clock: Callable[[], float] = time.time):
+        self._store = store
+        self._fetch = fetch
+        self._logger = logger
+        self._retry_interval = retry_interval
+        self._clock = clock
+        self.failure_delay = retry_interval
+
+    async def cycle(self) -> float:
+        assets = _usable(await self._store.assets_by_type("fiat"), self._logger, self.name)
+        period = min((a.resolution_seconds for a in assets), default=DEFAULT_FIAT_PERIOD)
+        until_next = seconds_until_next(self._clock(), period, FIAT_OFFSET)
+
+        if await self._collect(assets):
+            return until_next
+        # Сутки до следующей попытки — слишком долго: неуспешный цикл
+        # повторяется чаще.
+        return min(self._retry_interval, until_next)
+
+    async def _collect(self, assets: list[Asset]) -> bool:
+        if not assets:
+            return True
+
+        try:
+            day, prices = await erapi.fetch_prices(self._fetch, [a.symbol for a in assets])
+        except SourceError as exc:
+            self._logger.error("request failed", source=erapi.NAME,
+                               error_type=type(exc).__name__, error=str(exc))
+            return False
+
+        await self._save_prices(assets, day, prices)
+        return True
+
+    async def _save_prices(self, assets: list[Asset], day: datetime,
+                           prices: dict[str, Decimal]) -> None:
+        candles = [flat_candle(a.id, a.resolution, day, prices[a.symbol])
+                   for a in assets if a.symbol in prices]
+        missing = sorted(a.symbol for a in assets if a.symbol not in prices)
+        if missing:
+            self._logger.warning("currencies missing in response", source=erapi.NAME,
+                                 symbols=missing)
+        saved = await self._store.save_candles(candles)
+        self._logger.info("fiat cycle finished", source=erapi.NAME, day=day.date().isoformat(),
+                          fetched=len(candles), saved=saved)
