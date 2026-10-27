@@ -1,0 +1,10 @@
+.git
+.github
+.env
+*.md
+!README.md
+Dockerfile
+.dockerignore
+*.exe
+*.test
+*.out
