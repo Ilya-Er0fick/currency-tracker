@@ -119,3 +119,28 @@ jobs:
       - name: Журнал контейнера
         if: always()
         run: docker logs api
+
+  # Задания без needs выполняются параллельно, и падение одного не отменяет
+  # остальные. Тестам сборщика база и сеть не нужны: источники и хранилище
+  # в них подменяются.
+  collector:
+    name: Сборщик
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: collector/requirements-dev.txt
+
+      - name: Установка зависимостей
+        run: pip install -r collector/requirements-dev.txt
+
+      - name: Линтер
+        run: ruff check collector
+
+      - name: Тесты
+        run: python -m pytest collector

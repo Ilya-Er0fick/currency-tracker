@@ -19,6 +19,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r collector/requirements-dev.txt
 .venv/bin/python -m collector
 .venv/bin/python -m pytest collector
+.venv/bin/ruff check collector
 ```
 
 Тесты не требуют базы и сети: источники и хранилище в них подменяются.
