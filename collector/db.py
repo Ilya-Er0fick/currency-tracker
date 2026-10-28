@@ -51,6 +51,14 @@ SELECT pg_notify($1, json_build_object('asset_id', id)::text)
 FROM unnest($2::integer[]) AS id
 """
 
+# Канал текущих котировок для режима реального времени (stream.TickChannel
+# на сервере). В базу они не пишутся: сервер держит их только в памяти.
+TICKS_CHANNEL = "ticks"
+
+_NOTIFY_TICKS = """
+SELECT pg_notify($1, payload) FROM unnest($2::text[]) AS payload
+"""
+
 
 class Store:
     def __init__(self, pool: asyncpg.Pool):
@@ -85,3 +93,7 @@ class Store:
             if assets:
                 await conn.execute(_NOTIFY_CANDLES, CANDLES_CHANNEL, assets)
         return len(rows)
+
+    async def notify_ticks(self, payloads: list[str]) -> None:
+        if payloads:
+            await self._pool.execute(_NOTIFY_TICKS, TICKS_CHANNEL, payloads)

@@ -16,6 +16,7 @@ from .httpclient import json_fetcher
 from .jobs import CryptoJob, FiatJob
 from .schedule import run_periodic
 from .sources import bybit, cbr, erapi
+from .stream import StreamService
 
 USER_AGENT = "currency-tracker-collector/1.0"
 
@@ -48,8 +49,13 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
                 FiatJob(store, fetch, breaker(erapi.NAME), breaker(cbr.NAME), stop, logger,
                         attempts=cfg.retry_attempts, retry_interval=cfg.fiat_retry_interval),
             ]
+            # Поток держит своё соединение с базой: подписка LISTEN на список
+            # зрителей действует в пределах соединения и не может жить в пуле.
+            stream = StreamService(store, session, lambda: asyncpg.connect(cfg.database_url),
+                                   logger)
             logger.info("collector started", jobs=[job.name for job in jobs])
-            await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
+            await asyncio.gather(stop.wait(), stream.run(stop),
+                                 *(run_periodic(job, stop, logger) for job in jobs))
     finally:
         await pool.close()
     logger.info("collector stopped")
