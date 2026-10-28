@@ -21,6 +21,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Config:
     database_url: str
+    http_timeout: float = 10.0
     db_pool_size: int = 5
     log_level: str = "INFO"
 
@@ -37,6 +38,7 @@ def load(environ: dict[str, str] | None = None) -> Config:
 
     return Config(
         database_url=database_url,
+        http_timeout=_positive(environ, "COLLECTOR_HTTP_TIMEOUT", 10.0, float),
         db_pool_size=_positive(environ, "COLLECTOR_DB_POOL_SIZE", 5, int),
         log_level=environ.get("COLLECTOR_LOG_LEVEL", "INFO").upper(),
     )

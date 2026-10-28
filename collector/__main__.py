@@ -29,7 +29,11 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
     pool = await asyncpg.create_pool(cfg.database_url, min_size=1, max_size=cfg.db_pool_size)
     try:
         store = Store(pool)
-        async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
+        # Без явного значения действует умолчание aiohttp — пять минут на запрос:
+        # подвисший источник остановил бы минутный цикл надолго.
+        timeout = aiohttp.ClientTimeout(total=cfg.http_timeout)
+        async with aiohttp.ClientSession(timeout=timeout,
+                                         headers={"User-Agent": USER_AGENT}) as session:
             fetch = json_fetcher(session)
             jobs = [CryptoJob(store, fetch, logger)]
             logger.info("collector started", jobs=[job.name for job in jobs])
