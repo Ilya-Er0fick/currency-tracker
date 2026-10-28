@@ -49,10 +49,12 @@ jobs:
       - name: Сборка
         run: go build ./...
 
+      # Детектор гонок обязателен: буфер котировок и список зрителей трогают
+      # из нескольких горутин, а гонки проявляются не каждый прогон.
       - name: Тесты
         env:
           TEST_DATABASE_URL: postgres://tracker:tracker@localhost:5432/tracker?sslmode=disable
-        run: go test ./... -count=1
+        run: go test ./... -race -count=1
 
   image:
     name: Образ сервера
