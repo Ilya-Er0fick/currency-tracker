@@ -38,7 +38,17 @@ SELECT * FROM unnest($1::integer[], $2::smallint[], $3::timestamptz[],
                      $4::numeric[], $5::numeric[], $6::numeric[], $7::numeric[],
                      $8::numeric[], $9::numeric[])
 ON CONFLICT (asset_id, resolution, collected_at) DO NOTHING
-RETURNING id
+RETURNING asset_id
+"""
+
+# Канал, по которому сервер узнаёт о новых свечах и проверяет оповещения
+# пользователей (alerts.Channel на сервере). Нагрузка — только актив:
+# цены сервер возьмёт из базы сам.
+CANDLES_CHANNEL = "candles"
+
+_NOTIFY_CANDLES = """
+SELECT pg_notify($1, json_build_object('asset_id', id)::text)
+FROM unnest($2::integer[]) AS id
 """
 
 
@@ -59,5 +69,14 @@ class Store:
              c.volume, c.turnover)
             for c in candles
         )))
-        rows = await self._pool.fetch(_INSERT_CANDLES, *map(list, columns))
+
+        # Уведомления в транзакции уходят только при фиксации: сервер не
+        # получит сигнал о свече, которой нет в базе. Уведомляются лишь
+        # активы с действительно добавленными строками — повтор той же
+        # свечи после перезапуска не запускает проверку правил заново.
+        async with self._pool.acquire() as conn, conn.transaction():
+            rows = await conn.fetch(_INSERT_CANDLES, *map(list, columns))
+            assets = sorted({row["asset_id"] for row in rows})
+            if assets:
+                await conn.execute(_NOTIFY_CANDLES, CANDLES_CHANNEL, assets)
         return len(rows)
