@@ -3,11 +3,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from collector.db import Asset
-from collector.errors import RequestRejectedError
-from collector.jobs import CryptoJob, _usable
-from collector.sources import bybit
+from collector.errors import RequestRejectedError, TransientError
+from collector.jobs import CryptoJob, FiatJob, _usable
+from collector.sources import bybit, erapi
 
-from .helpers import FakeClock, FakeSource, FakeStore, RecordingLogger, crypto, quiet_logger
+from .helpers import FakeClock, FakeSource, FakeStore, RecordingLogger, crypto, fiat, quiet_logger
 
 # 2026-10-27 21:33:05 UTC
 NOW = 1793136785.0
@@ -133,3 +133,55 @@ def test_usable_skips_unsupported_resolution():
     assert _usable([good, odd, weekly], logger, "crypto") == [good]
     skipped = [f["symbol"] for level, _, f in logger.records if level == "error"]
     assert skipped == ["ODD", "WEEK"]
+
+
+FIAT = [fiat(31, "USD"), fiat(33, "RUB"), fiat(32, "EUR")]
+ERAPI_OK = {"result": "success", "time_last_update_unix": 1793059351,
+            "rates": {"USD": 1, "RUB": 84, "EUR": 0.92}}
+
+
+def fiat_job(store, source, clock, logger=None):
+    return FiatJob(store, source, logger or quiet_logger(), retry_interval=600, clock=clock)
+
+
+def test_fiat_cycle_stores_inverted_rates():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: ERAPI_OK})
+
+    delay = asyncio.run(fiat_job(store, source, clock).cycle())
+
+    prices = {c.asset_id: c.close for c in store.saved}
+    assert prices == {31: Decimal("1.00000000"), 33: Decimal("0.01190476"),
+                      32: Decimal("1.08695652")}
+    rub = next(c for c in store.saved if c.asset_id == 33)
+    assert rub.open == rub.high == rub.low == rub.close
+    assert rub.volume is None and rub.turnover is None
+    assert rub.resolution == 1440
+    assert rub.collected_at == datetime(2026, 10, 27, tzinfo=timezone.utc)
+    assert source.calls == [erapi.URL]  # один запрос на все валюты
+    # Следующий цикл — в 01:00 UTC следующих суток.
+    assert NOW + delay == datetime(2026, 10, 28, 1, tzinfo=timezone.utc).timestamp()
+
+
+def test_fiat_failure_retries_sooner_than_a_day():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: TransientError("503")})
+
+    assert asyncio.run(fiat_job(store, source, clock).cycle()) == 600
+    assert store.saved == []
+
+
+def test_fiat_missing_currency_is_logged_and_others_saved():
+    clock = FakeClock(NOW)
+    logger = RecordingLogger()
+    store = FakeStore(fiat_assets=FIAT + [fiat(34, "XXX")])
+    source = FakeSource({erapi.URL: ERAPI_OK})
+
+    asyncio.run(fiat_job(store, source, clock, logger).cycle())
+
+    assert len(store.saved) == 3
+    missing = [f["symbols"] for _, msg, f in logger.records
+               if msg == "currencies missing in response"]
+    assert missing == [["XXX"]]

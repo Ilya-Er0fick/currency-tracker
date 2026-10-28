@@ -42,13 +42,21 @@ def crypto(asset_id: int, symbol: str) -> Asset:
     return Asset(asset_id, symbol, "crypto", "bybit", 60, True)
 
 
+def fiat(asset_id: int, symbol: str) -> Asset:
+    return Asset(asset_id, symbol, "fiat", "er-api", 86400, False)
+
+
 class FakeStore:
-    def __init__(self, crypto_assets=()):
+    def __init__(self, crypto_assets=(), fiat_assets=()):
         self.crypto = list(crypto_assets)
+        self.fiat = list(fiat_assets)
         self.saved = []
 
     async def assets_by_source(self, source):
         return [a for a in self.crypto if a.source == source]
+
+    async def assets_by_type(self, asset_type):
+        return self.fiat if asset_type == "fiat" else self.crypto
 
     async def save_candles(self, candles):
         self.saved.extend(candles)
