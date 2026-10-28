@@ -6,28 +6,53 @@ import asyncio
 import signal
 import sys
 
+import aiohttp
 import asyncpg
 
 from . import config, log
-from .schedule import Job, run_periodic
+from .db import Store
+from .httpclient import json_fetcher
+from .jobs import CryptoJob
+from .schedule import run_periodic
+
+USER_AGENT = "currency-tracker-collector/1.0"
 
 
 async def run(cfg: config.Config, logger: log.Logger) -> None:
     # Событие остановки вместо отмены задач: начатый цикл дорабатывает,
     # а новые не начинаются.
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _request_stop, stop, logger, sig)
+    install_stop_handlers(asyncio.get_running_loop(), stop, logger)
 
     pool = await asyncpg.create_pool(cfg.database_url, min_size=1, max_size=cfg.db_pool_size)
     try:
-        jobs: list[Job] = []
-        logger.info("collector started", jobs=[job.name for job in jobs])
-        await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
+        store = Store(pool)
+        # Без явного значения действует умолчание aiohttp — пять минут на запрос:
+        # подвисший источник остановил бы минутный цикл надолго.
+        timeout = aiohttp.ClientTimeout(total=cfg.http_timeout)
+        async with aiohttp.ClientSession(timeout=timeout,
+                                         headers={"User-Agent": USER_AGENT}) as session:
+            fetch = json_fetcher(session)
+            jobs = [CryptoJob(store, fetch, logger)]
+            logger.info("collector started", jobs=[job.name for job in jobs])
+            await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
     finally:
         await pool.close()
     logger.info("collector stopped")
+
+
+def install_stop_handlers(loop: asyncio.AbstractEventLoop, stop: asyncio.Event,
+                          logger: log.Logger) -> None:
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, _request_stop, stop, logger, sig)
+        except NotImplementedError:
+            # На Windows цикл событий обработчиков сигналов не поддерживает.
+            # Обычный обработчик выполняется вне цикла, поэтому остановка
+            # передаётся в него потокобезопасно. sig фиксируется аргументом
+            # по умолчанию: иначе все обработчики видели бы последний сигнал.
+            signal.signal(sig, lambda _signum, _frame, sig=sig: loop.call_soon_threadsafe(
+                _request_stop, stop, logger, sig))
 
 
 def _request_stop(stop: asyncio.Event, logger: log.Logger, sig: signal.Signals) -> None:

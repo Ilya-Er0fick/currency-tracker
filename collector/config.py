@@ -14,6 +14,9 @@ ENV_FILE = ".env"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
+
+
 class ConfigError(Exception):
     """Ошибка настройки: повторять бессмысленно, нужно исправить окружение."""
 
@@ -21,6 +24,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class Config:
     database_url: str
+    http_timeout: float = 10.0
     db_pool_size: int = 5
     log_level: str = "INFO"
 
@@ -35,10 +39,18 @@ def load(environ: dict[str, str] | None = None) -> Config:
     if not database_url:
         raise ConfigError("DATABASE_URL is not set")
 
+    # Уровень проверяется здесь, а не при настройке журнала: опечатка должна
+    # дать понятную ошибку конфигурации, а не трассировку из logging.
+    log_level = environ.get("COLLECTOR_LOG_LEVEL", "INFO").upper()
+    if log_level not in LOG_LEVELS:
+        raise ConfigError(f"COLLECTOR_LOG_LEVEL: expected one of {', '.join(LOG_LEVELS)}, "
+                          f"got {log_level!r}")
+
     return Config(
         database_url=database_url,
+        http_timeout=_positive(environ, "COLLECTOR_HTTP_TIMEOUT", 10.0, float),
         db_pool_size=_positive(environ, "COLLECTOR_DB_POOL_SIZE", 5, int),
-        log_level=environ.get("COLLECTOR_LOG_LEVEL", "INFO").upper(),
+        log_level=log_level,
     )
 
 
