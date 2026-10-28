@@ -300,3 +300,66 @@ def test_fiat_failure_does_not_affect_crypto_breaker():
     assert primary.state is State.OPEN
     assert crypto_breaker.state is State.CLOSED
     assert any(c.asset_id == 2 for c in store.saved)
+
+
+CBR_OK = {"Date": "2026-10-28T11:30:00+03:00", "Valute": {"USD": {"Nominal": 1, "Value": 80}}}
+
+
+def test_fiat_switches_to_cbr_when_primary_breaker_opens():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: CBR_OK})
+    primary = breaker("er-api", clock, threshold=3)
+
+    async def go():
+        job = fiat_job(store, source, clock, primary=primary)
+
+        for _ in range(2):
+            await job.cycle()
+        assert cbr.URL not in source.calls  # пока Closed — резерв не трогаем
+        assert store.saved == []
+
+        await job.cycle()
+        assert primary.state is State.OPEN
+        assert source.calls[-1] == cbr.URL
+        assert len(store.saved) == 1
+        rub = store.saved[0]
+        assert rub.asset_id == 33
+        assert rub.resolution == 1440
+        assert rub.close == Decimal("0.01250000")  # 1/80, не 80
+        assert rub.collected_at == datetime(2026, 10, 28, tzinfo=timezone.utc)
+
+        # Пока основной источник в Open, к нему не обращаемся, а резерв опрашивается.
+        calls = len(source.calls)
+        await job.cycle()
+        assert source.calls[calls:] == [cbr.URL]
+
+    asyncio.run(go())
+
+
+def test_fiat_without_rub_skips_backup():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=[fiat(31, "USD")])
+    source = FakeSource({erapi.URL: TransientError("503")})
+
+    asyncio.run(fiat_job(store, source, clock, primary=breaker("er-api", clock, 1)).cycle())
+
+    assert cbr.URL not in source.calls
+
+
+def test_backup_failure_opens_its_own_breaker():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: TransientError("503")})
+    primary, backup = breaker("er-api", clock, 1), breaker("cbr", clock, 1)
+
+    async def go():
+        job = fiat_job(store, source, clock, primary=primary, backup=backup)
+        await job.cycle()
+        assert backup.state is State.OPEN
+        calls = len(source.calls)
+        await job.cycle()
+        assert source.calls[calls:] == []  # оба источника приостановлены
+
+    asyncio.run(go())
+    assert store.saved == []
