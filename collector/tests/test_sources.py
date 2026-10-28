@@ -5,7 +5,7 @@ import pytest
 
 from collector.candles import parse_decimal, unit_price
 from collector.errors import InvalidResponseError, RequestRejectedError, TransientError
-from collector.sources import bybit, erapi
+from collector.sources import bybit, cbr, erapi
 
 from .helpers import crypto
 
@@ -144,3 +144,33 @@ def test_erapi_rejects_bad_responses(payload):
 def test_erapi_day_start():
     moment = datetime(2026, 10, 27, 23, 59, 59, tzinfo=timezone.utc)
     assert erapi.day_start(moment) == datetime(2026, 10, 27, tzinfo=timezone.utc)
+
+
+CBR = {
+    "Date": "2026-10-28T11:30:00+03:00",
+    "Valute": {"USD": {"CharCode": "USD", "Nominal": 1, "Value": 84.0}},
+}
+
+
+def test_cbr_rub_price():
+    day, price = cbr.parse_daily(CBR)
+
+    assert day == datetime(2026, 10, 28, tzinfo=timezone.utc)
+    assert price == Decimal("0.01190476")
+
+
+def test_cbr_respects_nominal():
+    payload = {"Date": CBR["Date"], "Valute": {"USD": {"Nominal": 10, "Value": 840}}}
+    assert cbr.parse_daily(payload)[1] == Decimal("0.01190476")
+
+
+@pytest.mark.parametrize("payload", [
+    {"Valute": {}},
+    {"Date": CBR["Date"], "Valute": {"EUR": {"Nominal": 1, "Value": 90}}},
+    {"Date": "not a date", "Valute": CBR["Valute"]},
+    {"Date": CBR["Date"], "Valute": {"USD": {"Nominal": 0, "Value": 84}}},
+    [],
+])
+def test_cbr_malformed(payload):
+    with pytest.raises(InvalidResponseError):
+        cbr.parse_daily(payload)
