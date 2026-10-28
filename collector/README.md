@@ -16,9 +16,12 @@ USDT на бирже не торгуется сам к себе, его мину
 
 ```
 python3 -m venv .venv
-.venv/bin/pip install -r collector/requirements.txt
+.venv/bin/pip install -r collector/requirements-dev.txt
 .venv/bin/python -m collector
+.venv/bin/python -m pytest collector
 ```
+
+Тесты не требуют базы и сети: источники и хранилище в них подменяются.
 
 Настройки — в `.env.example`, раздел «Сборщик данных».
 
