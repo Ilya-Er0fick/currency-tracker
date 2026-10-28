@@ -1,5 +1,4 @@
 import asyncio
-import os
 import signal
 
 from collector.__main__ import install_stop_handlers
@@ -21,7 +20,9 @@ def test_stop_handlers_fallback_without_loop_signal_support(monkeypatch):
         monkeypatch.setattr(loop, "add_signal_handler", unsupported)
         stop = asyncio.Event()
         install_stop_handlers(loop, stop, logger)
-        os.kill(os.getpid(), sig)
+        # os.kill на Windows сигнал не доставляет, а завершает процесс через
+        # TerminateProcess, поэтому вызывается сам установленный обработчик.
+        signal.getsignal(sig)(sig, None)
         await asyncio.wait_for(stop.wait(), 1)
 
     try:
