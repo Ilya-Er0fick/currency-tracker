@@ -1,6 +1,6 @@
 # Сборка вынесена в отдельный этап: инструменты Go и исходники нужны только
 # для компиляции, а в готовый образ попадает один статический файл.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26-alpine AS source
 
 WORKDIR /src
 
@@ -11,20 +11,33 @@ RUN go mod download
 
 COPY . .
 
+FROM source AS test
+CMD ["sh", "scripts/container-tests.sh"]
+
+FROM source AS build
+
 # CGO отключён, иначе получится динамический файл, которому в образе без libc
 # не на что опереться. Отладочные таблицы и пути сборки выброшены.
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/api ./cmd/api
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/devseed ./cmd/devseed
 
 
-FROM alpine:3.21
+FROM alpine:3.21 AS runtime
 
 # Сертификаты нужны для обращений к внешним источникам по HTTPS.
 RUN apk add --no-cache ca-certificates tzdata \
     && adduser -D -H -u 10001 app
 
-COPY --from=build /out/api /usr/local/bin/api
-
 USER app
+
+FROM runtime AS devseed
+COPY --from=build /out/devseed /usr/local/bin/devseed
+ENTRYPOINT ["devseed"]
+CMD ["-days=3"]
+
+# Последний этап остаётся сервером: существующий docker build и CI не меняются.
+FROM runtime AS api
+COPY --from=build /out/api /usr/local/bin/api
 EXPOSE 8080
 
 # Миграции сервер накатывает сам при запуске, поэтому отдельного шага

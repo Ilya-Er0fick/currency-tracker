@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_DB: tracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD в .env}
+    volumes:
+      # В официальном образе PostgreSQL 18 данные лежат в /var/lib/postgresql/18/…
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U tracker -d tracker"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      target: api
+    environment:
+      # pgx читает пароль из PGPASSWORD: спецсимволы не требуют URL-кодирования.
+      DATABASE_URL: postgres://tracker@db:5432/tracker?sslmode=disable
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD в .env}
+      AUTH_SECRET: ${AUTH_SECRET:?Укажите AUTH_SECRET в .env}
+      API_ADDR: :8080
+      API_SHUTDOWN_TIMEOUT: "10"
+      ROLLUP_INTERVAL: ${ROLLUP_INTERVAL:-60}
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    stop_grace_period: 15s
+    restart: unless-stopped
+
+  devseed:
+    profiles: [tools]
+    build:
+      context: .
+      target: devseed
+    environment:
+      DATABASE_URL: postgres://tracker@db:5432/tracker?sslmode=disable
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Укажите POSTGRES_PASSWORD в .env}
+    depends_on:
+      api:
+        # /health отвечает после применения миграций сервером.
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  postgres-data:
