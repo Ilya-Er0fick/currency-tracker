@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Protocol
@@ -43,6 +44,20 @@ def _usable(assets: list[Asset], logger: Logger, job: str) -> list[Asset]:
     return usable
 
 
+def _quote_minute(fetched: list[Candle], started: float) -> datetime:
+    """Минута, в которую ложится свеча USDT.
+
+    Берётся у свечей биржи: локальные часы могут расходиться с биржевыми,
+    а цикл — запаздывать, и тогда USDT оказался бы в другой минуте, чем
+    остальные активы, а в сравнении пар появились бы разрывы. Если свечи
+    разошлись по минутам, побеждает самая частая. Локальные часы остаются
+    на случай, когда биржа не отдала ничего.
+    """
+    if fetched:
+        return Counter(c.collected_at for c in fetched).most_common(1)[0][0]
+    return datetime.fromtimestamp((started // 60 - 1) * 60, timezone.utc)
+
+
 class CryptoJob(Job):
     """Раз в минуту забирает закрытую минутную свечу по каждому активу биржи."""
 
@@ -61,16 +76,16 @@ class CryptoJob(Job):
         period = min((a.resolution_seconds for a in assets), default=DEFAULT_CRYPTO_PERIOD)
         started = self._clock()
 
-        # Цена котировочной валюты в самой себе — единица, на бирже такой
-        # пары нет. Свеча пишется, чтобы пары с USDT имели обе стороны.
-        closed_minute = datetime.fromtimestamp((started // 60 - 1) * 60, timezone.utc)
-        candles = [flat_candle(a.id, a.resolution, closed_minute, Decimal(1))
-                   for a in assets if a.symbol == QUOTE_SYMBOL]
-
         traded = [a for a in assets if a.symbol != QUOTE_SYMBOL]
         fetched = await self._fetch_all(traded)
 
-        saved = await self._store.save_candles(candles + fetched)
+        # Цена котировочной валюты в самой себе — единица, на бирже такой
+        # пары нет. Свеча пишется, чтобы пары с USDT имели обе стороны.
+        quote_minute = _quote_minute(fetched, started)
+        quote = [flat_candle(a.id, a.resolution, quote_minute, Decimal(1))
+                 for a in assets if a.symbol == QUOTE_SYMBOL]
+
+        saved = await self._store.save_candles(fetched + quote)
         self._logger.info("crypto cycle finished", source=bybit.NAME, polled=len(traded),
                           fetched=len(fetched), failed=len(traded) - len(fetched), saved=saved,
                           duration_seconds=round(self._clock() - started, 3))
