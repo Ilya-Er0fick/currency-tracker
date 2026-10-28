@@ -68,7 +68,7 @@ class Store:
             (c.asset_id, c.resolution, c.collected_at, c.open, c.high, c.low, c.close,
              c.volume, c.turnover)
             for c in candles
-        )))
+        ), strict=True))
 
         # Уведомления в транзакции уходят только при фиксации: сервер не
         # получит сигнал о свече, которой нет в базе. Уведомляются лишь
