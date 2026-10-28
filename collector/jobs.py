@@ -93,3 +93,10 @@ class CryptoJob(Job):
             self._logger.error("request failed", source=bybit.NAME, symbol=asset.symbol,
                                error_type=type(exc).__name__, error=str(exc))
             return None
+        except Exception as exc:
+            # Непредвиденная ошибка по одному активу не должна срывать сбор:
+            # исключение из gather отменило бы весь цикл, и свечи остальных
+            # активов за эту минуту потерялись бы.
+            self._logger.exception("unexpected error", source=bybit.NAME, symbol=asset.symbol,
+                                   error_type=type(exc).__name__, error=str(exc))
+            return None
