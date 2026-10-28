@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from collector.breaker import CircuitBreaker, State
 from collector.db import Asset
 from collector.errors import RequestRejectedError, TransientError
 from collector.jobs import CryptoJob, FiatJob, _usable
@@ -26,8 +27,13 @@ def route(symbol):
     return f"{bybit.KLINE_URL}?{symbol}USDT"
 
 
-def crypto_job(store, source, clock, logger=None):
-    return CryptoJob(store, source, logger or quiet_logger(), clock=clock)
+def breaker(name, clock, threshold=3):
+    return CircuitBreaker(name, threshold, 300, quiet_logger(), clock=clock)
+
+
+def crypto_job(store, source, clock, logger=None, brk=None):
+    return CryptoJob(store, source, brk or breaker("bybit", clock), asyncio.Event(),
+                     logger or quiet_logger(), attempts=4, base_delay=0.001, clock=clock)
 
 
 def test_crypto_cycle_saves_closed_candles_and_unit_usdt():
@@ -140,8 +146,10 @@ ERAPI_OK = {"result": "success", "time_last_update_unix": 1793059351,
             "rates": {"USD": 1, "RUB": 84, "EUR": 0.92}}
 
 
-def fiat_job(store, source, clock, logger=None):
-    return FiatJob(store, source, logger or quiet_logger(), retry_interval=600, clock=clock)
+def fiat_job(store, source, clock, logger=None, primary=None):
+    return FiatJob(store, source, primary or breaker("er-api", clock), asyncio.Event(),
+                   logger or quiet_logger(), attempts=4, retry_interval=600, base_delay=0.001,
+                   clock=clock)
 
 
 def test_fiat_cycle_stores_inverted_rates():
@@ -185,3 +193,109 @@ def test_fiat_missing_currency_is_logged_and_others_saved():
     missing = [f["symbols"] for _, msg, f in logger.records
                if msg == "currencies missing in response"]
     assert missing == [["XXX"]]
+
+
+def test_crypto_breaker_opens_and_probes():
+    clock = FakeClock(NOW)
+    store = FakeStore([crypto(2, "BTC"), crypto(3, "ETH")])
+    down = TransientError("503")
+    source = FakeSource({route("BTC"): down, route("ETH"): down})
+    brk = breaker("bybit", clock, threshold=2)
+
+    async def go():
+        job = crypto_job(store, source, clock, brk=brk)
+
+        await job.cycle()
+        await job.cycle()
+        assert brk.state is State.OPEN
+        assert len(source.calls) == 2 * 2 * 4  # два цикла, два актива, четыре попытки
+
+        source.calls.clear()
+        await job.cycle()
+        assert source.calls == []  # Open: к источнику не обращаемся
+
+        clock.now += 300
+        source.routes[route("BTC")] = kline(CLOSED_MS + 300_000)
+        source.routes[route("ETH")] = kline(CLOSED_MS + 300_000)
+        await job.cycle()
+        assert brk.state is State.CLOSED
+        assert source.calls[0] == route("BTC")  # пробный запрос
+        assert len(store.saved) == 2
+
+    asyncio.run(go())
+
+
+def test_crypto_failed_probe_reopens_without_touching_others():
+    clock = FakeClock(NOW)
+    store = FakeStore([crypto(2, "BTC"), crypto(3, "ETH")])
+    down = TransientError("503")
+    source = FakeSource({route("BTC"): down, route("ETH"): down})
+    brk = breaker("bybit", clock, threshold=1)
+
+    async def go():
+        job = crypto_job(store, source, clock, brk=brk)
+        await job.cycle()
+        clock.now += 300
+        source.calls.clear()
+        await job.cycle()
+
+    asyncio.run(go())
+    assert source.calls == [route("BTC")]
+    assert brk.state is State.OPEN
+
+
+def test_crypto_single_symbol_failure_does_not_trip_breaker():
+    clock = FakeClock(NOW)
+    store = FakeStore([crypto(2, "BTC"), crypto(3, "TON")])
+    source = FakeSource({route("BTC"): kline(CLOSED_MS),
+                         route("TON"): RequestRejectedError("Not supported symbols")})
+    brk = breaker("bybit", clock, threshold=1)
+
+    asyncio.run(crypto_job(store, source, clock, brk=brk).cycle())
+
+    assert brk.state is State.CLOSED
+    assert source.calls.count(route("TON")) == 1  # 4xx не повторяется
+
+
+def test_fiat_breaker_opens_after_failed_cycles():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: TransientError("503")})
+    primary = breaker("er-api", clock, threshold=3)
+
+    async def go():
+        job = fiat_job(store, source, clock, primary=primary)
+        delays = [await job.cycle() for _ in range(3)]
+        assert delays == [600, 600, 600]
+        assert primary.state is State.OPEN
+        calls = len(source.calls)
+        await job.cycle()
+        assert len(source.calls) == calls  # Open: к источнику не обращаемся
+
+    asyncio.run(go())
+
+
+def test_fiat_invalid_response_is_not_retried():
+    clock = FakeClock(NOW)
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: {"result": "error", "error-type": "x"}})
+
+    asyncio.run(fiat_job(store, source, clock).cycle())
+
+    assert source.calls == [erapi.URL]
+
+
+def test_fiat_failure_does_not_affect_crypto_breaker():
+    clock = FakeClock(NOW)
+    store = FakeStore([crypto(2, "BTC")], FIAT)
+    source = FakeSource({erapi.URL: TransientError("503"), route("BTC"): kline(CLOSED_MS)})
+    primary, crypto_breaker = breaker("er-api", clock, 1), breaker("bybit", clock, 1)
+
+    async def go():
+        await fiat_job(store, source, clock, primary=primary).cycle()
+        await crypto_job(store, source, clock, brk=crypto_breaker).cycle()
+
+    asyncio.run(go())
+    assert primary.state is State.OPEN
+    assert crypto_breaker.state is State.CLOSED
+    assert any(c.asset_id == 2 for c in store.saved)
