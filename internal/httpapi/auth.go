@@ -118,14 +118,31 @@ const userIDKey contextKey = iota
 // requireAuth пропускает запрос дальше только с действительным токеном
 // и кладёт идентификатор пользователя в контекст запроса.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authenticate(next, headerToken)
+}
+
+// requireStreamAuth принимает токен ещё и параметром запроса: браузер не умеет
+// задавать заголовки на WebSocket-соединении, и другого способа передать его
+// у клиента нет. Для обычных запросов остаётся только заголовок — значение
+// в адресе оседает в истории браузера и в журналах посредников.
+func (s *Server) requireStreamAuth(next http.HandlerFunc) http.HandlerFunc {
+	return s.authenticate(next, func(r *http.Request) string {
+		if token := headerToken(r); token != "" {
+			return token
+		}
+		return strings.TrimSpace(r.URL.Query().Get("token"))
+	})
+}
+
+func (s *Server) authenticate(next http.HandlerFunc, extract func(*http.Request) string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		raw, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if !found || raw == "" {
+		raw := extract(r)
+		if raw == "" {
 			writeError(w, http.StatusUnauthorized, "authorization required")
 			return
 		}
 
-		userID, err := s.tokens.Parse(strings.TrimSpace(raw))
+		userID, err := s.tokens.Parse(raw)
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authorization required")
 			return
@@ -133,6 +150,14 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 		next(w, r.WithContext(context.WithValue(r.Context(), userIDKey, userID)))
 	}
+}
+
+func headerToken(r *http.Request) string {
+	raw, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !found {
+		return ""
+	}
+	return strings.TrimSpace(raw)
 }
 
 // UserID возвращает идентификатор пользователя, установленный requireAuth.

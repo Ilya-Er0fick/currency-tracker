@@ -124,7 +124,7 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /api/notifications", s.requireAuth(s.listNotifications))
 	mux.HandleFunc("POST /api/notifications/seen", s.requireAuth(s.markNotificationsSeen))
 
-	mux.HandleFunc("GET /api/stream", s.requireAuth(s.stream))
+	mux.HandleFunc("GET /api/stream", s.requireStreamAuth(s.stream))
 
 	return requestLogger(d.Logger)(mux)
 }
