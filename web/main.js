@@ -1,3 +1,14 @@
+import Chart from 'chart.js/auto';
+import {
+  trimZeros,
+  parseHistory,
+  parseStreamMessage,
+  crossRate,
+  buildAlertPayload,
+  describeAlert,
+  errorText,
+} from './parse.js';
+
 const state = {
   token: localStorage.getItem('token'),
   expiresAt: localStorage.getItem('expires_at'),
@@ -32,7 +43,7 @@ async function api(path, options = {}) {
 
   const data = await res.json().catch(() => null);
   if (!res.ok) {
-    const err = new Error(data?.message || (typeof data === 'string' ? data : 'Ошибка сервера'));
+    const err = new Error(errorText(data));
     err.status = res.status;
     err.data = data;
     throw err;
@@ -137,6 +148,19 @@ authForm.addEventListener('submit', async (e) => {
 
 document.getElementById('logout-btn').addEventListener('click', () => logout());
 
+const markSeenBtn = document.getElementById('mark-seen-btn');
+if (markSeenBtn) {
+  markSeenBtn.addEventListener('click', async () => {
+    // Уведомления остаются в истории, гасится только отметка непрочитанного.
+    try {
+      await api('/notifications/seen', { method: 'POST', body: JSON.stringify({}) });
+      await loadNotifications();
+    } catch (err) {
+      console.warn('Не удалось отметить прочитанными:', err);
+    }
+  });
+}
+
 async function initAppData() {
   await loadAssets();
   await loadWatchlist();
@@ -144,8 +168,9 @@ async function initAppData() {
   if (state.refreshTimer) clearInterval(state.refreshTimer);
   state.refreshTimer = setInterval(loadWatchlist, 60000);
 
-  loadAlerts();
-  loadNotificationsCount();
+  await loadAlerts();
+  loadNotifications();
+  setInterval(loadNotifications, 15000);
 }
 
 async function loadAssets() {
@@ -385,6 +410,94 @@ document.querySelectorAll('.btn-toggle').forEach(btn => {
 });
 
 let chartInstance = null;
+// Разобранные ряды держатся рядом с графиком: подсказке нужны открытие,
+// максимум и минимум, а в сам Chart.js уходят только цены закрытия.
+let chartPoints = [];
+
+function showChartMessage(text) {
+  const emptyState = document.getElementById('chart-empty-state');
+  if (chartInstance) {
+    chartInstance.destroy();
+    chartInstance = null;
+  }
+  emptyState.textContent = text;
+  emptyState.classList.remove('hidden');
+  setChartMeta('');
+}
+
+function setChartMeta(text) {
+  const el = document.getElementById('chart-meta');
+  if (el) el.textContent = text;
+}
+
+function formatPointTime(ms) {
+  const d = new Date(ms);
+  const short = state.currentPeriod === '1h' || state.currentPeriod === '4h' || state.currentPeriod === 'rt';
+  return short
+    ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : d.toLocaleDateString([], { day: '2-digit', month: '2-digit' }) + ' ' +
+      d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function resolutionName(resolution) {
+  return { 1: '1 минута', 5: '5 минут', 60: '1 час', 1440: '1 сутки' }[resolution] || resolution + ' мин';
+}
+
+// Требование US-2: при наведении выделенная кривая показывается свечой.
+// Chart.js рисует линию, поэтому OHLC выводится в подсказке.
+function ohlcLines(items) {
+  if (!items.length) return [];
+
+  const item = items[0];
+  const serie = chartPoints[item.datasetIndex];
+  const point = serie && serie.points[item.dataIndex];
+  if (!point || point.o === undefined) return [];
+
+  return [
+    `открытие ${formatRate(point.o)}`,
+    `максимум ${formatRate(point.h)}`,
+    `минимум  ${formatRate(point.l)}`,
+    `закрытие ${formatRate(point.c)}`,
+  ];
+}
+
+// Требование US-4: показатели считает сервер и возвращает вместе с графиком.
+function renderAnalytics(analytics) {
+  const box = document.getElementById('analytics-box');
+  if (!box) return;
+
+  if (!analytics || !state.selectedPair) {
+    box.innerHTML = '<small class="analytics-empty">Показатели появятся вместе с графиком</small>';
+    return;
+  }
+
+  const base = state.selectedPair.base.symbol;
+  const quote = state.selectedPair.quote.symbol;
+  const cells = [
+    [`Изменение ${base}`, percent(analytics.base_change)],
+    [`Изменение ${quote}`, percent(analytics.quote_change)],
+    ['Разность', percent(analytics.change_diff)],
+    [`Волатильность ${base}`, fixed(analytics.base_volatility, 3)],
+    [`Волатильность ${quote}`, fixed(analytics.quote_volatility, 3)],
+    ['Корреляция', fixed(analytics.correlation, 3)],
+  ];
+
+  box.innerHTML = cells
+    .map(([k, v]) => `<div class="analytics-cell"><span class="k">${k}</span><span class="v">${v}</span></div>`)
+    .join('');
+}
+
+// Сервер присылает null, когда точек за период недостаточно для расчёта.
+function percent(value) {
+  if (value === null || value === undefined) return '<i class="muted">недостаточно данных</i>';
+  const cls = value >= 0 ? 'up' : 'down';
+  return `<span class="${cls}">${value >= 0 ? '+' : ''}${value.toFixed(2)} %</span>`;
+}
+
+function fixed(value, digits) {
+  if (value === null || value === undefined) return '<i class="muted">недостаточно данных</i>';
+  return value.toFixed(digits);
+}
 
 async function renderChart() {
   const canvas = document.getElementById('main-chart');
@@ -398,10 +511,7 @@ async function renderChart() {
     return;
   }
 
-  let labels = [];
-  let series1 = [];
-  let series2 = [];
-  let hasRealData = false;
+  let parsed = { series: [], analytics: null };
 
   try {
     const query = new URLSearchParams({
@@ -412,39 +522,31 @@ async function renderChart() {
     });
 
     const res = await api(`/history?${query.toString()}`);
-    const rawList = Array.isArray(res) ? res : (res?.points || res?.candles || res?.series || res?.data || []);
-
-    if (rawList.length > 0) {
-      labels = rawList.map(p => {
-        const t = p.timestamp || p.time || p.collected_at || p.created_at;
-        return t ? new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-      });
-
-      series1 = rawList.map(p => parseFloat(p.rate ?? p.close ?? p.base_price ?? p.value ?? 0));
-
-      if (state.currentMode === 'compare') {
-        series2 = rawList.map(p => parseFloat(p.quote_price ?? p.quote_rate ?? (p.rate ? p.rate * 0.95 : 1)));
-      }
-      hasRealData = true;
-    }
+    parsed = parseHistory(res, state.currentMode);
   } catch (err) {
-    console.warn('Сервер не вернул историю:', err);
+    renderAnalytics(null);
+    showChartMessage(err.message || 'Не удалось загрузить историю');
+    return;
   }
 
-  if (!hasRealData) {
-    const baseRate = parseFloat(state.selectedPair.rate) || 0.0015;
-    const count = state.currentPeriod === '1h' ? 12 : state.currentPeriod === '4h' ? 24 : 30;
-    const now = Date.now();
-    const intervalMs = 5 * 60 * 1000;
+  chartPoints = parsed.series;
+  renderAnalytics(parsed.analytics);
 
-    for (let i = count; i >= 0; i--) {
-      labels.push(new Date(now - i * intervalMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
-      const delta = (Math.sin(i / 2) + (Math.random() - 0.5) * 0.2) * (baseRate * 0.03);
-      series1.push(+(baseRate + delta).toFixed(6));
-      series2.push(+(baseRate * 1.05 + Math.cos(i / 3) * (baseRate * 0.02)).toFixed(6));
-    }
+  const main = parsed.series[0];
+  if (!main || main.points.length === 0) {
+    // Пустой период так и показывается пустым. Рисовать здесь своё нельзя:
+    // выдуманную кривую примут за настоящий курс.
+    showChartMessage('Нет данных за выбранный период');
+    return;
   }
 
+  const labels = main.points.map(p => formatPointTime(p.t));
+  const series1 = main.points.map(p => p.c);
+  const series2 = state.currentMode === 'compare' && parsed.series[1]
+    ? parsed.series[1].points.map(p => p.c)
+    : [];
+
+  setChartMeta(`Детализация: ${resolutionName(main.resolution)} · точек: ${main.points.length}`);
   emptyState.classList.add('hidden');
 
   if (chartInstance) {
@@ -472,6 +574,7 @@ async function renderChart() {
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        plugins: { tooltip: { callbacks: { afterBody: ohlcLines } } },
         scales: {
           x: { grid: { display: false } },
           y: { position: 'left', grid: { color: '#f1f5f9' } }
@@ -508,6 +611,7 @@ async function renderChart() {
         responsive: true,
         maintainAspectRatio: false,
         interaction: { mode: 'nearest', axis: 'x', intersect: false },
+        plugins: { tooltip: { callbacks: { afterBody: ohlcLines } } },
         onHover: (event, activeElements) => {
           if (!chartInstance) return;
           if (activeElements && activeElements.length > 0) {
@@ -550,9 +654,14 @@ async function renderChart() {
 
 let realtimeSocket = null;
 let realtimePoints = [];
+// Поток присылает цены сторон по отдельности, а показывать надо курс пары.
+let realtimeSnapshots = {};
+let realtimeLatest = {};
 
 function startRealtimeStream() {
   stopRealtimeStream();
+  realtimeSnapshots = {};
+  realtimeLatest = {};
 
   const banner = document.getElementById('realtime-status-banner');
   banner.textContent = 'Подключение к потоку реального времени...';
@@ -574,14 +683,27 @@ function startRealtimeStream() {
     };
 
     realtimeSocket.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
+      const msg = parseStreamMessage(event.data);
+      const base = state.selectedPair.base.symbol;
+      const quote = state.selectedPair.quote.symbol;
 
-      if (Array.isArray(msg)) {
-        realtimePoints = msg.slice(-900);
-        initRealtimeChart(realtimePoints);
-      } else if (msg && (msg.rate || msg.value || msg.close)) {
-        appendRealtimePoint(msg);
+      if (msg.type === 'snapshot') {
+        realtimeSnapshots[msg.symbol] = msg.points;
+        if (msg.points.length) realtimeLatest[msg.symbol] = msg.points[msg.points.length - 1].v;
+        rebuildRealtimeChart(base, quote);
+        return;
       }
+
+      if (msg.type !== 'tick') return;
+
+      let at = 0;
+      for (const tick of msg.ticks) {
+        realtimeLatest[tick.symbol] = tick.v;
+        if (tick.t > at) at = tick.t;
+      }
+
+      const value = crossRate(realtimeLatest, base, quote);
+      if (value !== null) appendRealtimePoint({ t: at || Date.now(), v: value });
     };
 
     realtimeSocket.onerror = () => {
@@ -591,9 +713,12 @@ function startRealtimeStream() {
       banner.style.backgroundColor = '#fffbeb';
       banner.style.borderColor = '#fde68a';
 
-      // Отрисовываем текущее значение на графике
-      if (state.selectedPair) {
-        initRealtimeChart([{ timestamp: state.selectedPair.updated_at, rate: state.selectedPair.rate }]);
+      // Требование US-2: последнее сохранённое значение всё равно показывается.
+      if (state.selectedPair && state.selectedPair.rate) {
+        initRealtimeChart(
+          [{ t: new Date(state.selectedPair.updated_at || Date.now()).getTime(),
+             v: parseFloat(state.selectedPair.rate) }],
+          false);
       }
     };
 
@@ -614,15 +739,30 @@ function stopRealtimeStream() {
   if (banner) banner.classList.add('hidden');
 }
 
-function appendRealtimePoint(pt) {
+// Снимок приходит отдельным сообщением на каждую сторону. Курс пары — это
+// их отношение, поэтому ряд собирается после получения обоих снимков.
+function rebuildRealtimeChart(base, quote) {
+  const basePoints = realtimeSnapshots[base] || [];
+  const quotePoints = realtimeSnapshots[quote];
+  const hasQuote = Array.isArray(quotePoints) && quotePoints.length > 0;
+
+  realtimePoints = basePoints.map((point, i) => {
+    if (!hasQuote) return { t: point.t, v: point.v };
+    const q = (quotePoints[i] || quotePoints[quotePoints.length - 1]).v;
+    return { t: point.t, v: q ? point.v / q : point.v };
+  });
+
+  initRealtimeChart(realtimePoints, !hasQuote);
+}
+
+function appendRealtimePoint(point) {
   if (!chartInstance) return;
-  const timeStr = new Date(pt.timestamp || pt.time || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  const val = parseFloat(pt.rate || pt.value || pt.close);
 
-  chartInstance.data.labels.push(timeStr);
-  chartInstance.data.datasets[0].data.push(val);
+  chartInstance.data.labels.push(formatRealtimeTime(point.t));
+  chartInstance.data.datasets[0].data.push(point.v);
 
-  if (chartInstance.data.labels.length > 900) {
+  // Окно реального времени — 15 минут при котировке раз в секунду.
+  while (chartInstance.data.labels.length > 900) {
     chartInstance.data.labels.shift();
     chartInstance.data.datasets[0].data.shift();
   }
@@ -630,21 +770,34 @@ function appendRealtimePoint(pt) {
   chartInstance.update('none');
 }
 
-function initRealtimeChart(points) {
+function formatRealtimeTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function initRealtimeChart(points, baseOnly) {
   const canvas = document.getElementById('main-chart');
   if (!canvas) return;
   if (chartInstance) chartInstance.destroy();
 
+  const emptyState = document.getElementById('chart-empty-state');
+  if (emptyState) emptyState.classList.add('hidden');
+
+  const base = state.selectedPair.base.symbol;
+  const quote = state.selectedPair.quote.symbol;
+  setChartMeta(baseOnly
+    ? `Котировки ${quote} в потоке не передаются: показана цена ${base} в USDT`
+    : 'Детализация: 1 секунда · окно 15 минут');
+
   const ctx = canvas.getContext('2d');
-  const labels = points.map(p => new Date(p.timestamp || p.time || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-  const data = points.map(p => parseFloat(p.rate || p.value || p.close || 0));
+  const labels = points.map(p => formatRealtimeTime(p.t));
+  const data = points.map(p => p.v);
 
   chartInstance = new Chart(ctx, {
     type: 'line',
     data: {
       labels: labels,
       datasets: [{
-        label: `Realtime: ${state.selectedPair.base.symbol}/${state.selectedPair.quote.symbol}`,
+        label: baseOnly ? `Реальное время: ${base} в USDT` : `Реальное время: ${base}/${quote}`,
         data: data,
         borderColor: '#ef4444',
         backgroundColor: 'rgba(239, 68, 68, 0.05)',
@@ -676,29 +829,89 @@ async function loadAlerts() {
   }
 }
 
-async function loadNotificationsCount() {
+// Эндпоинт отдаёт только непрочитанные, поэтому их число — длина списка.
+async function loadNotifications() {
   try {
-    const res = await api('/notifications');
-    const badge = document.getElementById('unread-alerts-badge');
-    if (res && typeof res.unread_count !== 'undefined') {
-      badge.textContent = res.unread_count;
-    } else if (Array.isArray(res)) {
-      badge.textContent = res.filter(n => !n.seen).length;
-    }
+    const list = (await api('/notifications')) || [];
+    document.getElementById('unread-alerts-badge').textContent = list.length;
+    renderNotifications(list);
   } catch (err) {
+    console.warn('Уведомления недоступны:', err);
   }
 }
 
+function renderNotifications(list) {
+  const box = document.getElementById('notifications-list');
+  if (!box) return;
+
+  if (list.length === 0) {
+    box.innerHTML = '<small class="muted">Непрочитанных уведомлений нет</small>';
+    return;
+  }
+
+  box.innerHTML = list.map((n) => {
+    // В ответе нет типа условия, поэтому расшифровка берётся из правила:
+    // иначе процентное правило читалось бы как цена — «выше 3».
+    const rule = userAlerts.find(r => r.id === n.alert_rule_id);
+    const text = rule
+      ? describeAlert(rule)
+      : `${n.direction === 'above' ? 'выше' : 'ниже'} ${formatRate(n.target_value)}`;
+    return `<div class="notification-row"><b>${n.target}</b> ${text}
+      <span class="muted">${new Date(n.triggered_at).toLocaleString('ru-RU')}</span></div>`;
+  }).join('');
+}
+
+// Цель правила — это ряд: либо курс отдельного актива в USDT, либо кросс-курс
+// пары. В значении option хранится и тип цели, и её опознаватель.
 function updateAlertTargetOptions() {
   const targetSelect = document.getElementById('alert-target-select');
   if (!targetSelect || !state.selectedPair) return;
 
+  const base = state.selectedPair.base.symbol;
+  const quote = state.selectedPair.quote.symbol;
+
   targetSelect.innerHTML = '';
   if (state.currentMode === 'compare') {
-    targetSelect.appendChild(new Option(`Актив: ${state.selectedPair.base.symbol}`, state.selectedPair.base.symbol));
-    targetSelect.appendChild(new Option(`Актив: ${state.selectedPair.quote.symbol}`, state.selectedPair.quote.symbol));
+    targetSelect.appendChild(new Option(`Курс ${base} в USDT`, `asset:${base}`));
+    targetSelect.appendChild(new Option(`Курс ${quote} в USDT`, `asset:${quote}`));
   } else {
-    targetSelect.appendChild(new Option(`Пара: ${state.selectedPair.base.symbol}/${state.selectedPair.quote.symbol}`, `${state.selectedPair.base.symbol}/${state.selectedPair.quote.symbol}`));
+    targetSelect.appendChild(new Option(`Кросс-курс ${base}/${quote}`, `pair:${state.selectedPair.id}`));
+  }
+  updateAlertHint();
+}
+
+function showAlertError(message) {
+  const el = document.getElementById('alert-error');
+  if (!el) return;
+  el.textContent = message || '';
+  el.classList.toggle('hidden', !message);
+}
+
+// Пороговое правило срабатывает при ПЕРЕСЕЧЕНИИ порога между двумя соседними
+// свечами. Если курс уже по нужную сторону, пересекать нечего, и правило будет
+// молчать — без подсказки это выглядит как поломка.
+function updateAlertHint() {
+  const hint = document.getElementById('alert-hint');
+  if (!hint || !state.selectedPair) return;
+
+  const kind = document.getElementById('alert-type-select').value;
+  const value = parseFloat((document.getElementById('alert-value-input').value || '').replace(',', '.'));
+  const rate = parseFloat(state.selectedPair.rate);
+
+  if ((kind !== 'above' && kind !== 'below') || !isFinite(value) || !isFinite(rate)) {
+    hint.textContent = 'Правила сверяются с сохранёнными свечами; котировки потока в базу не пишутся.';
+    hint.className = 'alert-hint';
+    return;
+  }
+
+  const crossed = kind === 'above' ? rate >= value : rate <= value;
+  if (crossed) {
+    hint.textContent = `Курс уже ${kind === 'above' ? 'выше' : 'ниже'} порога (${formatRate(state.selectedPair.rate)}). ` +
+      'Правило ждёт пересечения и сейчас не сработает.';
+    hint.className = 'alert-hint warn';
+  } else {
+    hint.textContent = `Текущий курс ${formatRate(state.selectedPair.rate)} — порог ещё не пересечён.`;
+    hint.className = 'alert-hint';
   }
 }
 
@@ -706,27 +919,43 @@ const alertForm = document.getElementById('create-alert-form');
 if (alertForm) {
   alertForm.addEventListener('submit', async (e) => {
     e.preventDefault();
-    const target = document.getElementById('alert-target-select').value;
-    const type = document.getElementById('alert-type-select').value;
-    const value = parseFloat(document.getElementById('alert-value-input').value);
-    const interval = document.getElementById('alert-interval-select')?.value || '1h';
+    showAlertError('');
 
-    const payload = { target, type, value, interval, pair_id: state.selectedPair?.id };
+    const target = document.getElementById('alert-target-select').value;
+    if (!target) {
+      showAlertError('Сначала выберите пару');
+      return;
+    }
+
+    const [targetType, id] = target.split(':');
+    const payload = buildAlertPayload({
+      kind: document.getElementById('alert-type-select').value,
+      value: (document.getElementById('alert-value-input').value || '').trim().replace(',', '.'),
+      windowMinutes: document.getElementById('alert-interval-select').value,
+      targetType,
+      symbol: targetType === 'asset' ? id : undefined,
+      pairId: targetType === 'pair' ? Number(id) : undefined,
+    });
 
     try {
-      await api('/alerts', {
-        method: 'POST',
-        body: JSON.stringify(payload)
-      });
+      await api('/alerts', { method: 'POST', body: JSON.stringify(payload) });
+      document.getElementById('alert-value-input').value = '';
       await loadAlerts();
-      document.getElementById('alert-value-input').value = '';
+      updateAlertHint();
     } catch (err) {
-      userAlerts.push({ id: Date.now(), ...payload });
-      renderAlertsList();
-      document.getElementById('alert-value-input').value = '';
+      // Правило, которого нет на сервере, показывать нельзя: оно не сработает,
+      // а в списке будет выглядеть действующим.
+      showAlertError(err.message || 'Правило не создано');
     }
   });
 }
+
+['alert-type-select', 'alert-target-select'].forEach((id) => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener('change', updateAlertHint);
+});
+const alertValueInput = document.getElementById('alert-value-input');
+if (alertValueInput) alertValueInput.addEventListener('input', updateAlertHint);
 
 function renderAlertsList() {
   const container = document.getElementById('alerts-list');
@@ -734,36 +963,56 @@ function renderAlertsList() {
   container.innerHTML = '';
 
   if (userAlerts.length === 0) {
-    container.innerHTML = '<small style="color: #94a3b8;">Нет активных правил оповещений</small>';
+    container.innerHTML = '<small class="muted">Нет правил оповещений</small>';
     return;
   }
 
-  userAlerts.forEach((alert) => {
+  userAlerts.forEach((rule) => {
     const row = document.createElement('div');
-    row.style = 'display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; margin-bottom: 6px; font-size: 13px;';
-    
-    let typeLabel = '';
-    if (alert.type === 'threshold_gt') typeLabel = 'Курс >';
-    else if (alert.type === 'threshold_lt') typeLabel = 'Курс <';
-    else typeLabel = `Изм. > ${alert.value}% (за ${alert.interval || '1h'})`;
+    row.className = 'alert-row';
+
+    const target = rule.pair || rule.symbol || '—';
+    const fired = rule.status === 'triggered' ? '<span class="fired-tag">сработало</span>' : '';
 
     row.innerHTML = `
-      <span> <b>${alert.target}</b>: ${typeLabel} ${alert.type.includes('threshold') ? alert.value : ''}</span>
-      <button class="btn-small" style="color: #ef4444;" data-id="${alert.id}">Удалить</button>
+      <span><b>${target}</b> ${describeAlert(rule)} ${fired}</span>
+      <span class="alert-row-actions">
+        <button class="btn-small" data-action="edit">Изменить</button>
+        <button class="btn-small danger" data-action="delete">Удалить</button>
+      </span>
     `;
 
-    row.querySelector('button').addEventListener('click', async () => {
-      try {
-        await api(`/alerts/${alert.id}`, { method: 'DELETE' });
-      } catch (e) {
-        userAlerts = userAlerts.filter(a => a.id !== alert.id);
-      }
-      await loadAlerts();
-      renderAlertsList();
-    });
+    row.querySelector('[data-action="edit"]').addEventListener('click', () => editAlert(rule));
+    row.querySelector('[data-action="delete"]').addEventListener('click', () => deleteAlert(rule));
 
     container.appendChild(row);
   });
+}
+
+// US-3: список правил служит для просмотра, изменения и удаления. Изменение
+// заодно снимает отметку «сработало», и правило начинает действовать снова.
+async function editAlert(rule) {
+  const next = prompt('Новое значение правила:', trimZeros(rule.target_value));
+  if (next === null) return;
+
+  try {
+    await api(`/alerts/${rule.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ target_value: next.trim().replace(',', '.') }),
+    });
+    await loadAlerts();
+  } catch (err) {
+    showAlertError(err.message || 'Правило не изменено');
+  }
+}
+
+async function deleteAlert(rule) {
+  try {
+    await api(`/alerts/${rule.id}`, { method: 'DELETE' });
+    await loadAlerts();
+  } catch (err) {
+    showAlertError(err.message || 'Правило не удалено');
+  }
 }
 
 if (state.token && state.expiresAt && new Date(state.expiresAt) > new Date()) {

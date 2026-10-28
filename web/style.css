@@ -69,3 +69,27 @@ body { background: #f8fafc; color: #1e293b; height: 100vh; overflow: hidden; }
 .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; }
 .close-btn { background: none; border: none; font-size: 24px; cursor: pointer; color: #94a3b8; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+
+.chart-meta { font-size: 12px; color: #64748b; margin-top: 10px; text-align: right; }
+
+.analytics-section { margin-top: 20px; background: white; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; }
+.analytics-section h4 { font-size: 14px; margin-bottom: 12px; }
+.analytics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+.analytics-cell { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.analytics-cell .k { font-size: 11px; color: #64748b; }
+.analytics-cell .v { font-size: 16px; font-family: monospace; }
+.analytics-empty { color: #94a3b8; }
+.up { color: #15803d; }
+.down { color: #dc2626; }
+.muted { color: #94a3b8; }
+
+.alert-hint { font-size: 12px; color: #64748b; margin-top: 10px; line-height: 1.5; }
+.alert-hint.warn { color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 8px 10px; }
+
+.alerts-list { margin-top: 12px; display: flex; flex-direction: column; gap: 6px; }
+.alert-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; }
+.alert-row-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.btn-small.danger { color: #dc2626; }
+.fired-tag { background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 1px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; margin-left: 4px; }
+
+.notification-row { padding: 8px 10px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 13px; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
