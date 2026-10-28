@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -201,6 +202,7 @@ func TestUserPathFromRegistrationToNotification(t *testing.T) {
 type env struct {
 	server *httptest.Server
 	pool   *pgxpool.Pool
+	hub    *stream.Hub
 }
 
 func setup(t *testing.T) *env {
@@ -222,6 +224,7 @@ func setup(t *testing.T) *env {
 	go alerts.NewListener(pool, alerts.NewService(storage.NewAlerts(pool), logger), logger).Run(listenerCtx)
 
 	hub := stream.NewHub(stream.DefaultSize)
+	e.hub = hub
 	router := httpapi.NewRouter(httpapi.Deps{
 		DB:            pool,
 		Users:         storage.NewUsers(pool),
@@ -447,4 +450,44 @@ func testPool(t *testing.T) *pgxpool.Pool {
 	})
 
 	return pool
+}
+
+// Обрыв соединения со зрителем должен снимать подписку: по списку
+// просматриваемых активов сборщик решает, какие подписки держать на бирже,
+// и оставшийся зритель заставил бы его качать поток впустую.
+//
+// Клиент в этот канал ничего не шлёт, поэтому обрыв замечается только чтением
+// соединения — без него сервер молчит, пока нет котировок, и ничего не узнаёт.
+func TestStreamReleasesSubscriptionOnDisconnect(t *testing.T) {
+	env := setup(t)
+
+	var registered struct {
+		Token string `json:"token"`
+	}
+	env.do(t, http.MethodPost, "/api/auth/register", "",
+		map[string]string{"email": "stream@example.com", "password": "secret-password"},
+		http.StatusCreated, &registered)
+
+	if watched := env.hub.Watched(); len(watched) != 0 {
+		t.Fatalf("до подключения просматриваются %v, ожидался пустой список", watched)
+	}
+
+	url := "ws" + strings.TrimPrefix(env.server.URL, "http") +
+		"/api/stream?base=BTC&quote=USDT&token=" + registered.Token
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	conn, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("подключение к потоку: %v", err)
+	}
+
+	env.waitFor(t, "появление зрителя в списке", nil,
+		func() bool { return len(env.hub.Watched()) == 2 })
+
+	conn.CloseNow()
+
+	env.waitFor(t, "снятие подписки после обрыва", nil,
+		func() bool { return len(env.hub.Watched()) == 0 })
 }

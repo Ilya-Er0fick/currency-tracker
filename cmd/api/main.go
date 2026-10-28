@@ -64,6 +64,10 @@ func run(logger *slog.Logger) error {
 	hub := stream.NewHub(stream.DefaultSize)
 	go stream.NewListener(pool, hub, logger).Run(ctx)
 
+	// Сборщик держит подписку на бирже только на просматриваемые активы,
+	// поэтому список зрителей уходит ему при изменении и по сроку.
+	go stream.NewPublisher(hub, stream.PostgresNotify(pool), logger).Run(ctx)
+
 	alertStore := storage.NewAlerts(pool)
 	go alerts.NewListener(pool, alerts.NewService(alertStore, logger), logger).Run(ctx)
 
