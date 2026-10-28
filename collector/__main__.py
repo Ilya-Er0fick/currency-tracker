@@ -10,10 +10,12 @@ import aiohttp
 import asyncpg
 
 from . import config, log
+from .breaker import CircuitBreaker
 from .db import Store
 from .httpclient import json_fetcher
 from .jobs import CryptoJob, FiatJob
 from .schedule import run_periodic
+from .sources import bybit, erapi
 
 USER_AGENT = "currency-tracker-collector/1.0"
 
@@ -33,9 +35,18 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
         async with aiohttp.ClientSession(timeout=timeout,
                                          headers={"User-Agent": USER_AGENT}) as session:
             fetch = json_fetcher(session)
+
+            # Предохранитель у каждого источника свой: отказ биржи
+            # не должен останавливать опрос курсов валют.
+            def breaker(name: str) -> CircuitBreaker:
+                return CircuitBreaker(name, cfg.breaker_threshold, cfg.breaker_open_interval,
+                                      logger)
+
             jobs = [
-                CryptoJob(store, fetch, logger),
-                FiatJob(store, fetch, logger, retry_interval=cfg.fiat_retry_interval),
+                CryptoJob(store, fetch, breaker(bybit.NAME), stop, logger,
+                          attempts=cfg.retry_attempts),
+                FiatJob(store, fetch, breaker(erapi.NAME), stop, logger,
+                        attempts=cfg.retry_attempts, retry_interval=cfg.fiat_retry_interval),
             ]
             logger.info("collector started", jobs=[job.name for job in jobs])
             await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))

@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from collector.breaker import CircuitBreaker
 from collector.db import Asset
 from collector.errors import RequestRejectedError, TransientError
 from collector.jobs import CryptoJob, FiatJob, _usable
@@ -26,8 +27,13 @@ def route(symbol):
     return f"{bybit.KLINE_URL}?{symbol}USDT"
 
 
-def crypto_job(store, source, clock, logger=None):
-    return CryptoJob(store, source, logger or quiet_logger(), clock=clock)
+def breaker(name, clock, threshold=3):
+    return CircuitBreaker(name, threshold, 300, quiet_logger(), clock=clock)
+
+
+def crypto_job(store, source, clock, logger=None, brk=None):
+    return CryptoJob(store, source, brk or breaker("bybit", clock), asyncio.Event(),
+                     logger or quiet_logger(), attempts=4, base_delay=0.001, clock=clock)
 
 
 def test_crypto_cycle_saves_closed_candles_and_unit_usdt():
@@ -140,8 +146,10 @@ ERAPI_OK = {"result": "success", "time_last_update_unix": 1793059351,
             "rates": {"USD": 1, "RUB": 84, "EUR": 0.92}}
 
 
-def fiat_job(store, source, clock, logger=None):
-    return FiatJob(store, source, logger or quiet_logger(), retry_interval=600, clock=clock)
+def fiat_job(store, source, clock, logger=None, primary=None):
+    return FiatJob(store, source, primary or breaker("er-api", clock), asyncio.Event(),
+                   logger or quiet_logger(), attempts=4, retry_interval=600, base_delay=0.001,
+                   clock=clock)
 
 
 def test_fiat_cycle_stores_inverted_rates():

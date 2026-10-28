@@ -25,6 +25,9 @@ class ConfigError(Exception):
 class Config:
     database_url: str
     http_timeout: float = 10.0
+    retry_attempts: int = 4
+    breaker_threshold: int = 3
+    breaker_open_interval: float = 300.0
     fiat_retry_interval: float = 600.0
     db_pool_size: int = 5
     log_level: str = "INFO"
@@ -50,6 +53,9 @@ def load(environ: dict[str, str] | None = None) -> Config:
     return Config(
         database_url=database_url,
         http_timeout=_positive(environ, "COLLECTOR_HTTP_TIMEOUT", 10.0, float),
+        retry_attempts=_positive(environ, "COLLECTOR_RETRY_ATTEMPTS", 4, int),
+        breaker_threshold=_positive(environ, "COLLECTOR_BREAKER_THRESHOLD", 3, int),
+        breaker_open_interval=_positive(environ, "COLLECTOR_BREAKER_OPEN_INTERVAL", 300.0, float),
         fiat_retry_interval=_positive(environ, "COLLECTOR_FIAT_RETRY_INTERVAL", 600.0, float),
         db_pool_size=_positive(environ, "COLLECTOR_DB_POOL_SIZE", 5, int),
         log_level=log_level,

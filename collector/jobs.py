@@ -9,11 +9,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Protocol
 
+from .breaker import CircuitBreaker, State
 from .candles import QUOTE_SYMBOL, RESOLUTIONS, Candle, flat_candle
 from .db import Asset
 from .errors import SourceError
 from .httpclient import FetchJSON
 from .log import Logger
+from .retry import with_retry
 from .schedule import Job, seconds_until_next
 from .sources import bybit, erapi
 
@@ -24,6 +26,11 @@ FIAT_OFFSET = 3600.0
 
 DEFAULT_CRYPTO_PERIOD = 60
 DEFAULT_FIAT_PERIOD = 86400
+
+# Доля периода, которую цикл может потратить на повторы: следующий цикл
+# не должен начинаться, пока не закончился предыдущий.
+CYCLE_BUDGET_SHARE = 0.75
+MAX_FIAT_BUDGET = 120.0
 
 # Одновременных запросов к бирже: каталог опрашивается за секунды,
 # а лимит биржи остаётся далеко.
@@ -67,11 +74,16 @@ class CryptoJob(Job):
     name = "crypto"
     failure_delay = DEFAULT_CRYPTO_PERIOD
 
-    def __init__(self, store: Store, fetch: FetchJSON, logger: Logger, *,
-                 clock: Callable[[], float] = time.time):
+    def __init__(self, store: Store, fetch: FetchJSON, breaker: CircuitBreaker,
+                 stop: asyncio.Event, logger: Logger, *, attempts: int,
+                 base_delay: float = 1.0, clock: Callable[[], float] = time.time):
         self._store = store
         self._fetch = fetch
+        self._breaker = breaker
+        self._stop = stop
         self._logger = logger
+        self._attempts = attempts
+        self._base_delay = base_delay
         self._clock = clock
 
     async def cycle(self) -> float:
@@ -80,7 +92,8 @@ class CryptoJob(Job):
         started = self._clock()
 
         traded = [a for a in assets if a.symbol != QUOTE_SYMBOL]
-        fetched = await self._fetch_all(traded)
+        deadline = asyncio.get_running_loop().time() + period * CYCLE_BUDGET_SHARE
+        fetched = await self._fetch_all(traded, deadline)
 
         # Цена котировочной валюты в самой себе — единица, на бирже такой
         # пары нет. Свеча пишется, чтобы пары с USDT имели обе стороны.
@@ -91,22 +104,54 @@ class CryptoJob(Job):
         saved = await self._store.save_candles(fetched + quote)
         self._logger.info("crypto cycle finished", source=bybit.NAME, polled=len(traded),
                           fetched=len(fetched), failed=len(traded) - len(fetched), saved=saved,
+                          breaker=self._breaker.state.value,
                           duration_seconds=round(self._clock() - started, 3))
         return seconds_until_next(self._clock(), period, CRYPTO_OFFSET)
 
-    async def _fetch_all(self, assets: list[Asset]) -> list[Candle]:
+    async def _fetch_all(self, assets: list[Asset], deadline: float) -> list[Candle]:
+        if not assets:
+            return []
+
+        state = self._breaker.state
+        if state is State.OPEN:
+            self._logger.warning("source suspended by circuit breaker", source=bybit.NAME)
+            return []
+
+        fetched: list[Candle] = []
+        if state is State.HALF_OPEN:
+            # Пробный запрос один и без повторов: источник, только что
+            # отвечавший ошибками, не нужно нагружать всем каталогом сразу.
+            probe, assets = assets[0], assets[1:]
+            candle = await self._fetch_one(probe, deadline, attempts=1)
+            if candle is None:
+                self._breaker.record_failure()
+                return []
+            fetched.append(candle)
+
         semaphore = asyncio.Semaphore(BYBIT_CONCURRENCY)
 
         async def limited(asset: Asset) -> Candle | None:
             async with semaphore:
-                return await self._fetch_one(asset)
+                return await self._fetch_one(asset, deadline, attempts=self._attempts)
 
         results = await asyncio.gather(*(limited(a) for a in assets))
-        return [c for c in results if c is not None]
+        fetched.extend(c for c in results if c is not None)
 
-    async def _fetch_one(self, asset: Asset) -> Candle | None:
+        # Цикл неуспешен, только если источник не отдал ничего: отказ по одному
+        # символу — это ошибка справочника, а не недоступность биржи.
+        if fetched:
+            self._breaker.record_success()
+        else:
+            self._breaker.record_failure()
+        return fetched
+
+    async def _fetch_one(self, asset: Asset, deadline: float, attempts: int) -> Candle | None:
         try:
-            return await bybit.fetch_candle(self._fetch, asset, self._clock)
+            return await with_retry(
+                lambda: bybit.fetch_candle(self._fetch, asset, self._clock),
+                attempts=attempts, deadline=deadline, stop=self._stop, logger=self._logger,
+                what=f"{bybit.NAME}:{asset.symbol}", base_delay=self._base_delay,
+            )
         except SourceError as exc:
             self._logger.error("request failed", source=bybit.NAME, symbol=asset.symbol,
                                error_type=type(exc).__name__, error=str(exc))
@@ -125,12 +170,18 @@ class FiatJob(Job):
 
     name = "fiat"
 
-    def __init__(self, store: Store, fetch: FetchJSON, logger: Logger, *,
-                 retry_interval: float, clock: Callable[[], float] = time.time):
+    def __init__(self, store: Store, fetch: FetchJSON, primary: CircuitBreaker,
+                 stop: asyncio.Event, logger: Logger, *,
+                 attempts: int, retry_interval: float, base_delay: float = 1.0,
+                 clock: Callable[[], float] = time.time):
         self._store = store
         self._fetch = fetch
+        self._primary = primary
+        self._stop = stop
         self._logger = logger
+        self._attempts = attempts
         self._retry_interval = retry_interval
+        self._base_delay = base_delay
         self._clock = clock
         self.failure_delay = retry_interval
 
@@ -139,25 +190,39 @@ class FiatJob(Job):
         period = min((a.resolution_seconds for a in assets), default=DEFAULT_FIAT_PERIOD)
         until_next = seconds_until_next(self._clock(), period, FIAT_OFFSET)
 
-        if await self._collect(assets):
+        if await self._collect(assets, period):
             return until_next
         # Сутки до следующей попытки — слишком долго: неуспешный цикл
-        # повторяется чаще.
+        # повторяется чаще, и по этим повторам предохранитель источника
+        # успевает открыться.
         return min(self._retry_interval, until_next)
 
-    async def _collect(self, assets: list[Asset]) -> bool:
+    async def _collect(self, assets: list[Asset], period: float) -> bool:
         if not assets:
             return True
 
-        try:
-            day, prices = await erapi.fetch_prices(self._fetch, [a.symbol for a in assets])
-        except SourceError as exc:
-            self._logger.error("request failed", source=erapi.NAME,
-                               error_type=type(exc).__name__, error=str(exc))
-            return False
-
-        await self._save_prices(assets, day, prices)
-        return True
+        deadline = asyncio.get_running_loop().time() + min(period * CYCLE_BUDGET_SHARE,
+                                                           MAX_FIAT_BUDGET)
+        state = self._primary.state
+        if state is State.OPEN:
+            self._logger.warning("source suspended by circuit breaker", source=erapi.NAME)
+        else:
+            attempts = 1 if state is State.HALF_OPEN else self._attempts
+            try:
+                day, prices = await with_retry(
+                    lambda: erapi.fetch_prices(self._fetch, [a.symbol for a in assets]),
+                    attempts=attempts, deadline=deadline, stop=self._stop,
+                    logger=self._logger, what=erapi.NAME, base_delay=self._base_delay,
+                )
+            except SourceError as exc:
+                self._primary.record_failure()
+                self._logger.error("request failed", source=erapi.NAME,
+                                   error_type=type(exc).__name__, error=str(exc))
+            else:
+                self._primary.record_success()
+                await self._save_prices(assets, day, prices)
+                return True
+        return False
 
     async def _save_prices(self, assets: list[Asset], day: datetime,
                            prices: dict[str, Decimal]) -> None:
