@@ -12,7 +12,7 @@ import asyncpg
 from . import config, log
 from .db import Store
 from .httpclient import json_fetcher
-from .jobs import CryptoJob
+from .jobs import CryptoJob, FiatJob
 from .schedule import run_periodic
 
 USER_AGENT = "currency-tracker-collector/1.0"
@@ -33,7 +33,10 @@ async def run(cfg: config.Config, logger: log.Logger) -> None:
         async with aiohttp.ClientSession(timeout=timeout,
                                          headers={"User-Agent": USER_AGENT}) as session:
             fetch = json_fetcher(session)
-            jobs = [CryptoJob(store, fetch, logger)]
+            jobs = [
+                CryptoJob(store, fetch, logger),
+                FiatJob(store, fetch, logger, retry_interval=cfg.fiat_retry_interval),
+            ]
             logger.info("collector started", jobs=[job.name for job in jobs])
             await asyncio.gather(stop.wait(), *(run_periodic(job, stop, logger) for job in jobs))
     finally:

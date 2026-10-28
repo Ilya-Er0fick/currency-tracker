@@ -14,6 +14,7 @@ def test_load_defaults():
     cfg = config.load({"DATABASE_URL": "postgres://x"})
     assert cfg.database_url == "postgres://x"
     assert cfg.http_timeout == 10.0
+    assert cfg.fiat_retry_interval == 600.0
     assert cfg.db_pool_size == 5
     assert cfg.log_level == "INFO"
 

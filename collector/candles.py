@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_EVEN, Decimal, InvalidOperation
 
 from .errors import InvalidResponseError
+
+# Масштаб столбцов цены в price_candles: numeric(18, 8).
+PRICE_QUANTUM = Decimal("0.00000001")
+MAX_PRICE = Decimal("9999999999.99999999")
 
 # Валюта, в которой выражены все цены. Цена её самой — единица по определению.
 QUOTE_SYMBOL = "USDT"
@@ -41,3 +45,22 @@ def parse_decimal(raw) -> Decimal:
     if not value.is_finite() or value < 0:
         raise InvalidResponseError(f"not a valid price: {raw!r}")
     return value
+
+
+def unit_price(units_per_usd) -> Decimal:
+    """Переводит курс «сколько единиц валюты за доллар» в цену одной единицы.
+
+    Источники фиатных курсов отдают, например, 84 рубля за доллар, а в базе
+    цена означает «сколько USDT стоит одна единица актива», то есть 1/84.
+    Без переворота кросс-курс BTC/RUB получился бы равным 753 вместо
+    примерно пяти миллионов.
+    """
+    rate = parse_decimal(units_per_usd)
+    if rate == 0:
+        raise InvalidResponseError("zero exchange rate")
+    price = (Decimal(1) / rate).quantize(PRICE_QUANTUM, rounding=ROUND_HALF_EVEN)
+    if price == 0:
+        raise InvalidResponseError(f"rate {units_per_usd!r} is below storage precision")
+    if price > MAX_PRICE:
+        raise InvalidResponseError(f"rate {units_per_usd!r} is above storage range")
+    return price

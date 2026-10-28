@@ -3,9 +3,9 @@ from decimal import Decimal
 
 import pytest
 
-from collector.candles import parse_decimal
+from collector.candles import parse_decimal, unit_price
 from collector.errors import InvalidResponseError, RequestRejectedError, TransientError
-from collector.sources import bybit
+from collector.sources import bybit, erapi
 
 from .helpers import crypto
 
@@ -91,3 +91,56 @@ def test_parse_decimal(raw, expected):
 def test_parse_decimal_rejects(raw):
     with pytest.raises(InvalidResponseError):
         parse_decimal(raw)
+
+
+def test_unit_price_inverts_rate():
+    # 84 рубля за доллар — это 1/84 доллара за рубль, а не 84.
+    assert unit_price(84) == Decimal("0.01190476")
+    assert unit_price("1") == Decimal("1.00000000")
+    assert unit_price(0.92) == Decimal("1.08695652")
+
+
+def test_unit_price_keeps_cross_rate_direction():
+    # Кросс-курс считается делением цен: BTC/RUB должен выйти миллионами.
+    btc, rub = Decimal("81000"), unit_price(80)
+    assert btc / rub == Decimal("6480000")
+
+
+@pytest.mark.parametrize("rate", [0, -1, "abc", 10**12, 10**-11])
+def test_unit_price_rejects_unusable_rates(rate):
+    with pytest.raises(InvalidResponseError):
+        unit_price(rate)
+
+
+ERAPI = {
+    "result": "success",
+    "time_last_update_unix": 1793059351,
+    "rates": {"USD": 1, "RUB": 84, "EUR": 0.92, "JPY": 150.5},
+}
+
+
+def test_erapi_inverts_and_filters():
+    day, prices = erapi.parse_latest(ERAPI, ["USD", "RUB", "EUR", "BYN"])
+
+    assert day == datetime(2026, 10, 27, tzinfo=timezone.utc)
+    assert prices == {
+        "USD": Decimal("1.00000000"),
+        "RUB": Decimal("0.01190476"),
+        "EUR": Decimal("1.08695652"),
+    }
+
+
+@pytest.mark.parametrize("payload", [
+    {"result": "error", "error-type": "unsupported-code"},
+    {"result": "success", "rates": {"RUB": 84}},
+    {"result": "success", "time_last_update_unix": 1, "rates": []},
+    [],
+])
+def test_erapi_rejects_bad_responses(payload):
+    with pytest.raises(InvalidResponseError):
+        erapi.parse_latest(payload, ["RUB"])
+
+
+def test_erapi_day_start():
+    moment = datetime(2026, 10, 27, 23, 59, 59, tzinfo=timezone.utc)
+    assert erapi.day_start(moment) == datetime(2026, 10, 27, tzinfo=timezone.utc)
