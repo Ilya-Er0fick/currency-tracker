@@ -205,3 +205,75 @@ func TestRequireAuth(t *testing.T) {
 		})
 	}
 }
+
+// Браузер не умеет задавать заголовки на WebSocket-соединении, поэтому для
+// потока токен принимается и параметром запроса.
+func TestStreamAuthAcceptsTokenFromQuery(t *testing.T) {
+	tokens := auth.NewTokenIssuer(strings.Repeat("k", 32), time.Hour)
+	token, _, err := tokens.Issue(42)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	server := &Server{tokens: tokens}
+	var seen int64
+	handler := server.requireStreamAuth(func(w http.ResponseWriter, r *http.Request) {
+		seen, _ = UserID(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name    string
+		query   string
+		header  string
+		want    int
+		wantUID int64
+	}{
+		{name: "параметром запроса", query: "?token=" + token, want: http.StatusOK, wantUID: 42},
+		{name: "заголовком", header: "Bearer " + token, want: http.StatusOK, wantUID: 42},
+		{name: "без токена", want: http.StatusUnauthorized},
+		{name: "с негодным токеном", query: "?token=nonsense", want: http.StatusUnauthorized},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			seen = 0
+			req := httptest.NewRequest(http.MethodGet, "/api/stream"+tc.query, nil)
+			if tc.header != "" {
+				req.Header.Set("Authorization", tc.header)
+			}
+
+			rec := httptest.NewRecorder()
+			handler(rec, req)
+
+			if rec.Code != tc.want {
+				t.Fatalf("статус = %d, ожидался %d", rec.Code, tc.want)
+			}
+			if seen != tc.wantUID {
+				t.Errorf("пользователь = %d, ожидался %d", seen, tc.wantUID)
+			}
+		})
+	}
+}
+
+// Обычные эндпоинты токен из адреса принимать не должны: значение в адресе
+// оседает в истории браузера и в журналах посредников.
+func TestRequireAuthIgnoresQueryToken(t *testing.T) {
+	tokens := auth.NewTokenIssuer(strings.Repeat("k", 32), time.Hour)
+	token, _, err := tokens.Issue(42)
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+
+	server := &Server{tokens: tokens}
+	handler := server.requireAuth(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	handler(rec, httptest.NewRequest(http.MethodGet, "/api/watchlist?token="+token, nil))
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("статус = %d, ожидался %d", rec.Code, http.StatusUnauthorized)
+	}
+}
