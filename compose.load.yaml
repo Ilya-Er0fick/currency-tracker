@@ -73,8 +73,12 @@ services:
     profiles: [browser]
     build:
       context: web/e2e
+    network_mode: "service:web"
+    depends_on:
+      web:
+        condition: service_healthy
     environment:
-      BASE_URL: http://web:3000
+      BASE_URL: http://127.0.0.1:3000
       CI: "true"
     volumes:
       - ${LOAD_OUTPUT:-./load/results}:/results
