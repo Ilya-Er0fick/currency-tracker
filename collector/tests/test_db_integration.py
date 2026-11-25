@@ -39,10 +39,13 @@ async def database(dsn):
         await admin.execute(f'CREATE SCHEMA "{schema}"')
         settings = {"search_path": schema}
         try:
-            async with asyncpg.create_pool(dsn, server_settings=settings, min_size=1, max_size=2) as pool:
+            async with asyncpg.create_pool(
+                dsn, server_settings=settings, min_size=1, max_size=2,
+            ) as pool:
                 await pool.execute(MIGRATION.read_text(encoding="utf-8"))
                 await pool.executemany(
-                    "INSERT INTO assets (id, symbol, type, source, resolution_seconds, supports_realtime) "
+                    "INSERT INTO assets "
+                    "(id, symbol, type, source, resolution_seconds, supports_realtime) "
                     "VALUES ($1, $2, 'crypto', 'bybit', 60, true)", [(btc, "BTC"), (eth, "ETH")])
                 listener = await asyncpg.connect(dsn, server_settings=settings)
                 try:
@@ -80,23 +83,23 @@ def test_candle_batch_is_visible_when_notification_arrives(database_url):
         async with database(database_url) as (store, observer, notifications, btc, eth):
             candles = batch(btc, eth)
             assert await store.save_candles(candles) == 3
-            for asset_id, expected in ((btc, 2), (eth, 1)):
-                # Уведомления не обязаны идти в этом порядке. Проверяем
-                # видимость всех свечей независимо от первого актива.
-                received = await asyncio.wait_for(notifications.get(), timeout=5)
-                assert received in (btc, eth)
+            seen = set()
+            expected_counts = {btc: 2, eth: 1}
+            for _ in expected_counts:
+                asset_id = await asyncio.wait_for(notifications.get(), timeout=5)
+                assert asset_id not in seen
+                seen.add(asset_id)
                 assert await observer.fetchval(
-                    "SELECT count(*) FROM price_candles WHERE asset_id=$1", asset_id) == expected
-                if asset_id == btc:
-                    first = received
-                else:
-                    assert received != first
+                    "SELECT count(*) FROM price_candles WHERE asset_id=$1",
+                    asset_id,
+                ) == expected_counts[asset_id]
 
             rows = await observer.fetch(
                 "SELECT asset_id, resolution, collected_at, open_price, high_price, low_price, "
                 "close_price, volume, turnover FROM price_candles ORDER BY asset_id, collected_at")
             assert [tuple(row) for row in rows] == [
-                (c.asset_id, c.resolution, c.collected_at, c.open, c.high, c.low, c.close, c.volume, c.turnover)
+                (c.asset_id, c.resolution, c.collected_at, c.open, c.high,
+                 c.low, c.close, c.volume, c.turnover)
                 for c in candles]
             await assert_no_notifications(notifications)
 

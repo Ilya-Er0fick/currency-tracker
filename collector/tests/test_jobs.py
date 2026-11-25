@@ -306,7 +306,7 @@ CBR_OK = {"Date": "2026-10-28T11:30:00+03:00", "Valute": {"USD": {"Nominal": 1, 
 
 
 def test_fiat_switches_to_cbr_when_primary_breaker_opens():
-    clock = FakeClock(NOW)
+    clock = FakeClock(datetime(2026, 10, 28, 12, tzinfo=timezone.utc).timestamp())
     store = FakeStore(fiat_assets=FIAT)
     source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: CBR_OK})
     primary = breaker("er-api", clock, threshold=3)

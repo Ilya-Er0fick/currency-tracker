@@ -153,7 +153,7 @@ CBR = {
 
 
 def test_cbr_rub_price():
-    day, price = cbr.parse_daily(CBR)
+    day, price = cbr.parse_daily(CBR, now=datetime(2026, 10, 28, tzinfo=timezone.utc))
 
     assert day == datetime(2026, 10, 28, tzinfo=timezone.utc)
     assert price == Decimal("0.01190476")
@@ -161,7 +161,8 @@ def test_cbr_rub_price():
 
 def test_cbr_respects_nominal():
     payload = {"Date": CBR["Date"], "Valute": {"USD": {"Nominal": 10, "Value": 840}}}
-    assert cbr.parse_daily(payload)[1] == Decimal("0.01190476")
+    _, price = cbr.parse_daily(payload, now=datetime(2026, 10, 28, tzinfo=timezone.utc))
+    assert price == Decimal("0.01190476")
 
 
 @pytest.mark.parametrize("payload", [
@@ -202,3 +203,9 @@ def test_erapi_rejects_response_when_all_requested_rates_are_invalid():
     payload = {**ERAPI, "rates": {"RUB": 0}}
     with pytest.raises(InvalidResponseError):
         erapi.parse_latest(payload, ["RUB"])
+
+
+def test_cbr_skips_future_day_until_utc_midnight():
+    assert cbr.parse_daily(CBR, now=datetime(2026, 10, 27, 23, 59, tzinfo=timezone.utc)) is None
+    day, _ = cbr.parse_daily(CBR, now=datetime(2026, 10, 28, tzinfo=timezone.utc))
+    assert day == datetime(2026, 10, 28, tzinfo=timezone.utc)
