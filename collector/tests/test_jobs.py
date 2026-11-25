@@ -363,3 +363,15 @@ def test_backup_failure_opens_its_own_breaker():
 
     asyncio.run(go())
     assert store.saved == []
+
+
+def test_fiat_does_not_save_tomorrows_cbr_rate():
+    clock = FakeClock(datetime(2026, 10, 27, 23, 55, tzinfo=timezone.utc).timestamp())
+    store = FakeStore(fiat_assets=FIAT)
+    source = FakeSource({erapi.URL: TransientError("503"), cbr.URL: CBR_OK})
+    primary = breaker("er-api", clock, threshold=1)
+
+    asyncio.run(fiat_job(store, source, clock, primary=primary).cycle())
+
+    assert cbr.URL in source.calls
+    assert store.saved == []

@@ -123,11 +123,26 @@ jobs:
         run: docker logs api
 
   # Задания без needs выполняются параллельно, и падение одного не отменяет
-  # остальные. Тестам сборщика база и сеть не нужны: источники и хранилище
-  # в них подменяются.
+  # остальные. PostgreSQL нужен для интеграционных тестов записи свечей.
   collector:
     name: Сборщик
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: tracker
+          POSTGRES_PASSWORD: tracker
+          POSTGRES_DB: tracker
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://tracker:tracker@localhost:5432/tracker?sslmode=disable
 
     steps:
       - uses: actions/checkout@v4
